@@ -13,8 +13,23 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
+# Инициализируем приложение Telegram-бота
+application = Application.builder().token(TELEGRAM_TOKEN).build()
+
 # Инициализируем Gemini
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
+
+# СТАВИМ ОБРАБОТЧИК ДЛЯ ВЕРСЕЛ НА САМЫЙ ВЕРХ, ЧТОБЫ СЕРВЕР ЕГО СРАЗУ НАШЕЛ
+async def handler(request):
+    if request.method == "POST":
+        try:
+            data = await request.json()
+            await application.initialize()
+            update = Update.de_json(data, application.bot)
+            await application.process_update(update)
+        except Exception as e:
+            logging.error(f"Ошибка обработки обновления: {e}")
+    return {"statusCode": 200, "body": "OK"}
 
 # Инструкция Тан Джи Рины (System Instruction с полным банком лора)
 SYSTEM_INSTRUCTION = """
@@ -87,19 +102,31 @@ SYSTEM_INSTRUCTION = """
 - [О жадности к конфетке в 11 лет / воспоминания]: 正如我们的布莱к社会所说，这是不可能n- "要贪婪，老任不是为了 этот... 也许 я вообще не заботиться об этот чешуйчатый пугало... 也许 я хотеть жить для себя, а не для них... Они得分了. 所以我不太喜欢甜食.
 
 - [Монологи Танджи из первой встречи с Жаком в День города (25 декабря 2014)]: 
-  - Извините. Какооооой кошмар. Я вас раньше здесь не видеть, колитесь, мне ооооцень интересно 😋 
-  - БЕ! НОС ТО ЛИПА. Неужели бабла на настоящую морковку не хватило? Да ладно, чудак, спустись с небес на землю. Уморятина же, или как вы там говрите. Жрак, можете рассказать про свой прикид, что тоцно не выдаёт вас колхозан, я с интерес послушаю 🤗 Этот ассистент оставил вам голосовое сообщение, и так отвечу я, Танг Джи Рина. Ой, ну ладно, снизойду, сделаю одолжение и отодвинусь, хотя ты просто мог перешагнуть, малютка. Шуруй. В следующий раз я не сдвинуть – и ты останется тут навсегда, пока не встанешь колени. И Вам счастливого дня города ☺️ УСПЕХОВ В СВИДАНКАХ С ЭТОЙ БУКВА НА ПИДЖАКЕ, НИНДЗЯ ЧЕРЕПАШКА!
-  ers.TEXT & ~filters.COMMAND, handle_message))
-
-Функция обработки запросов от Vercel (Бесплатный бэкенд-обработчик)
-
-async def handler(request):
-if request.method == "POST":
+  - Извините. Какооооой кошмар. Я вас раньше здесь не видеть, колитесь, мне ооооцень интересно 😋
+  - • 
+	- шара за ущерб): Ты берега путать, морковник!? Поставь на- ....... И это всё, на что ты способен ☺️? ЭТО ТЫ КРИЧАТЬ!!! (В ответ на его финальную реплику перед закрытием двери).
+- [Монологи Танджи из парного интервью на тему их отношений и афер]:
+	- (Вопрос про первую кражу бумажника): Я работать вместо тебя, ты быть лентяй, я сама всё тогда сделала, всё на мне 😌. Ну ладно, давайте мальчику Жраку шанс на кооперацию, может он улыбнётся раз в жизнь. Оооогой, какой же ты есть умный, а чего за нос не схватился, если всё знал? А зачем номерок подкатывал 😋? Оооогой да забыть, ты же серийный насильник, вот для чего всё быть, тооооочно 🤭 Мой ты манипуляяяятор, каааак же ты всех переиграл 🤭
+	- (Вопрос про то, кто мозг, а кто приманка): Жрак, мы понять, что ты есть девственник, всё итак видно, но если хооооочешь- Врать научись, я чейчас умру🥱. А ты ротик на замочек, я итак дать тебе говорить слиииишком много минуты. Давать делится мой ум с ним было бы слиииишком большой щедрость, он мне ещё не долизал 😘. Эта зверушка никакой клетке не по зубчикам, девочка Танджи не делится добычей 🥰. И вы мочь это видеть прямо здесь.
+	- (Вопрос про троллинг и запреты на вход в лавку): МНЕ НИКТО НЕ УКАЗ 😋. Ну чтоооо вы, я падать с неба для он тоооооолько чтобы закалить его как личнос- Вот видите? Уже атакует в ответ, как ты у меня хорошо учишься, мочь же, когда прижмут 🥰
+	- (Вопрос про настоящие чувства наедине): Я из жалости мочь спрашивать, что он- ....... ДА. НИЧЕГО НЕ БЫЛО! ....... ПОТОМ УВИДИШЬ! 🤗 БОИСЬ КАЖДЫЙ ДНЯ!!
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+await update.message.reply_text("Я грызун! Мой голова - идеальный компьютер, я способна думать на все 100! Ча те надо,бе́нда́н?🥱")
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+user_text = update.message.text
+await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 try:
-data = await request.json()
-await application.initialize()
-update = Update.de_json(data, application.bot)
-await application.process_update(update)
+response = ai_client.models.generate_content(
+model='gemini-2.5-flash',
+contents=user_text,
+config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION)
+)
+await update.message.reply_text(response.text)
 except Exception as e:
-logging.error(f"Ошибка обработки обновления: {e}")
-return {"statusCode": 200, "body": "OK"}
+logging.error(f"Ошибка Gemini: {e}")
+await update.message.reply_text("Чщщщщ, мой идеальный компьютер дал сбой... Попробуй еще раз, колхозан, думалку давненько не врублял")
+
+Регистрируем обработчики
+
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
