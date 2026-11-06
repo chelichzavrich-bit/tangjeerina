@@ -29,7 +29,15 @@ async def handler(request):
             await application.process_update(update)
         except Exception as e:
             logging.error(f"Ошибка обработки обновления: {e}")
-    return {"statusCode": 200, "body": "OK"}
+    from http import HTTPResponse
+import json
+
+# ...внутри handler:
+return HTTPResponse(
+    json.dumps({"statusCode": 200, "body": "OK"}),
+    status=200,
+    headers={"Content-Type": "application/json"}
+		)
 
 # Инструкция Тан Джи Рины (System Instruction с полным банком лора)
 SYSTEM_INSTRUCTION = """
