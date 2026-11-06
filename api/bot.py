@@ -138,3 +138,22 @@ await update.message.reply_text("Чщщщщ, мой идеальный комп�
 
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+async def handler(request):
+    if request.method == "POST":
+        try:
+            data = await request.json()
+            # Инициализируем приложение при первом запросе
+            if not application.post_init:
+                await application.initialize()
+            
+            update = Update.de_json(data, application.bot)
+            await application.process_update(update)
+        except Exception as e:
+            logging.error(f"Ошибка: {e}")
+            
+    # Vercel требует именно такой формат ответа
+    return {
+        "statusCode": 200,
+        "body": "OK"
+			}
