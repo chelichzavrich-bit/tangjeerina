@@ -134,11 +134,20 @@ except Exception as e:
 logging.error(f"Ошибка Gemini: {e}")
 await update.message.reply_text("Чщщщщ, мой идеальный компьютер дал сбой... Попробуй еще раз, колхозан, думалку давненько не врублял")
 
-Регистрируем обработчики
-
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+async def handler(request):
+    if request.method == "POST":
+        try:
+            data = await request.json()
+            if not application.post_init:
+                await application.initialize()
+            update = Update.de_json(data, application.bot)
+            await application.process_update(update)
+        except Exception as e:
+            logging.error(f"Ошибка: {e}")
+    return {"statusCode": 200, "body": "OK"}
 async def handler(request):
     if request.method == "POST":
         try:
