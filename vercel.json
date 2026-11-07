@@ -1,7 +1,9 @@
 {
-  "functions": {
-    "api/bot.js": {
-      "maxDuration": 30
-    }
-  }
+  "version": 2,
+  "builds": [
+    { "src": "api/webhook.js", "use": "@vercel/node" }
+  ],
+  "routes": [
+    { "src": "/api/webhook", "dest": "api/webhook.js" }
+  ]
 }
