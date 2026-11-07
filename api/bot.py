@@ -74,10 +74,9 @@ async def setup_bot():
     
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['chat_history_text'] = ""
-        # Генерируем живое приветствие через модель, а не жесткую заглушку!
         try:
             response = ai_client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-2.0-flash',  # Исправлено на стабильную рабочую модель
                 contents="Пользователь только что нажал /start и вошел в твое логово. Скажи ему что-нибудь дерзкое, характерное для тебя, спроси, че ему надо.",
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_INSTRUCTION,
@@ -85,8 +84,8 @@ async def setup_bot():
                 )
             )
             await update.message.reply_text(response.text)
-        except Exception:
-            await update.message.reply_text("Я грызун! Мой голова - идеальный компьютер, я способна думать на все 100! Ча те надо,бе́нда́н?🥱")
+        except Exception as e:
+            await update.message.reply_text(f"Я грызун! Мой голова - идеальный компьютер! (Старт ошибка: {str(e)[:40]})")
 
     async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_text = update.message.text
@@ -95,37 +94,31 @@ async def setup_bot():
         
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         
-        # Храним историю в виде простой текстовой строки, чтобы Gemini никогда не падала
         if 'chat_history_text' not in context.user_data:
             context.user_data['chat_history_text'] = ""
             
         history = context.user_data['chat_history_text']
-        
-        # Формируем полный промпт для модели с учетом предыдущего диалога
         prompt_with_history = f"{history}\nСобеседник говорит: {user_text}\nТанджи отвечает:"
         
         try:
             response = ai_client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-2.0-flash',  # Исправлено на стабильную рабочую модель
                 contents=prompt_with_history,
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_INSTRUCTION,
-                    temperature=1.4,  # Максимальный креатив
+                    temperature=1.4,
                     top_p=0.95
                 )
             )
             
             bot_reply = response.text.strip()
-            
-            # Дописываем диалог в текстовую историю (ограничиваем размер, чтобы не росла бесконечно)
             context.user_data['chat_history_text'] = f"{history}\nСобеседник: {user_text}\nТанджи: {bot_reply}"[-3000:]
                 
             await update.message.reply_text(bot_reply)
             
         except Exception as e:
-            # Выводим реальную ошибку в логи Vercel, чтобы увидеть, если что-то не так
             logging.error(f"ОШИБКА GEMINI: {str(e)}")
-            await update.message.reply_text(f"Чщщщщ, мой идеальный компьютер дал сбой... (Техническая багулина: {str(e)[:50]})")
+            await update.message.reply_text(f"Чщщщщ, мой идеальный компьютер дал сбой... (Техническая багулина: {str(e)[:60]})")
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
