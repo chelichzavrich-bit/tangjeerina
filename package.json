@@ -1,10 +1,10 @@
 {
   "name": "tang-jee-rina-bot",
   "version": "1.0.0",
-  "description": "Telegram bot for Tang Jee Rina persona powered by Gemini API on Vercel",
+  "description": "Telegram bot",
   "main": "api/webhook.js",
   "dependencies": {
-    "@google/genai": "0.1.1",
-    "node-fetch": "2.7.0"
+    "@google/genai": "^0.1.1",
+    "node-fetch": "^2.7.0"
   }
 }
