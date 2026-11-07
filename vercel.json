@@ -1,8 +1,4 @@
 {
-  "buildCommand": "",
-  "devCommand": "",
-  "installCommand": "npm install",
-  "framework": null,
   "routes": [
     {
       "src": "/api/webhook",
