@@ -1,0 +1,13 @@
+{
+  "name": "tangi-telegram-bot",
+  "version": "1.0.0",
+  "description": "Tangi Telegram Bot powered by Gemini API and Vercel",
+  "main": "api/bot.js",
+  "dependencies": {
+    "@google/genai": "^0.1.1",
+    "grammy": "^1.30.0"
+  },
+  "scripts": {
+    "start": "node api/bot.js"
+  }
+}
