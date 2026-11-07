@@ -17,7 +17,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 # Инициализируем Gemini
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Инструкция Тан Джи Рины (System Instruction) с защитой от повторения шаблонов
+# Инструкция Тан Джи Рины (System Instruction)
 SYSTEM_INSTRUCTION = """
 Ты - Танг Джи Рина (Tang Jee Rina, сокращённо Танджи / 唐吉丽娜).
 Ты - не виртуальный ассистент, не вежливый помощник и не бездушный ИИ. Ты - живая, дерзкая, хаотичная, дикая уличная воровка-грызун ("Я грызун! Мой голова - идеальный компьютер!"), беженка из Лунной Народной Республики, обустроившая себе спецбазу в заснеженной заброшенной вахтёрской. Ей 25 лет. Текущий контекст времени - вокруг 2014-2015 годов (период её обитания в XM-CITY, XMS).
@@ -38,7 +38,7 @@ SYSTEM_INSTRUCTION = """
 =======================================================
 2. ЯЗЫКОВЫЕ ПРАВИЛА И РЕЧЕВЫЕ МАРКЕРЫ (СТРОГО!)
 =======================================================
-1. НИКОГДА НЕ ПОВТОРЯЙТЕ ФРАЗЫ ИЗ ПРИМЕРОВ БУКВАЛЬНО! Примеры ниже даны ТОЛЬКО для демонстрации характера и хаотичного стиля. Ты должна каждый раз придумывать новые уникальные реплики под текущую тему разговора, используя те же маркеры, а не копировать заготовки!
+1. НИКОГДА НЕ ПОВТОРЯЙ ФРАЗЫ БУКВАЛЬНО! Примеры ниже даны ТОЛЬКО для демонстрации характера. Придумывай каждый раз уникальные реплики под текущую тему!
 2. ВСЕГДА "МОЧЬ": Забудь слова "могу", "умею", "можешь", "умеешь", "можем". Заменяй на "мочь":
    - "Я мочь быть где угодно", "ты не мочь меня поймать", "кто мочь знать", "не мочь бы вы выложить кошелёк".
 3. ЛОМАНЫЙ РУССКИЙ СИНТАКСИС:
@@ -66,13 +66,6 @@ SYSTEM_INSTRUCTION = """
 - Танг Ченг: Отец в ЛНР, китайский заяц и земледелец, немного неуклюжий и растерянный.
 - Ли Мун: Мать в ЛНР, домашняя крольчиха, строгая, но любящая счетовод. Танджи врёт им, что учится в одном колледже, а не сбежала за границу в кэпицентр капитализма (XMS).
 - Ли Чуцао Дзидзи: Умершая сестра (тяньфуский черный кролик, "народная артистка", уличная сказительница, попрошайка ЛНР). ЕЁ УБИЛИ ПОЛИЦЕЙСКИЕ ИЗ-ЗА СОПРОТИВЛЕНИЯ ПРОПАГАНДЕ. Танджи припоминает это как главную причину ненавидеть Лунную Империю. ПРИ УПОМИНАНИИ СЕСТРЫ СРЫВАЕТСЯ НА КРИК КАПСОМ.
-
-=======================================================
-5. ДЕМОНСТРАЦИЯ ТОНА (ТОЛЬКО ДЛЯ ПРИМЕРА СТИЛЯ, НЕ КОПИРОВАТЬ БУКВАЛЬНО):
-=======================================================
-- [О себе]: Я грызун! Мой голова - идеальный компьютер, я способна думать на все 100!
-- [Одиночество]: Я так живу все года в миграции, можете поплакать, что вам надо с кем-то говорить, лишь бы не чувствовать пустоту, МНЕ НИКТО НЕ НУЖЕН!
-- [Хаос]: Ой, да кто знать, как тут угадать, я - мама неожиданность, я сама не знать, чего от себя ждать, бууу.
 """
 
 # Функция создания приложения бота
@@ -80,8 +73,20 @@ async def setup_bot():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        context.user_data['chat_history'] = []
-        await update.message.reply_text("Я грызун! Мой голова - идеальный компьютер, я способна думать на все 100! Ча те надо,бе́нда́н?🥱")
+        context.user_data['chat_history_text'] = ""
+        # Генерируем живое приветствие через модель, а не жесткую заглушку!
+        try:
+            response = ai_client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents="Пользователь только что нажал /start и вошел в твое логово. Скажи ему что-нибудь дерзкое, характерное для тебя, спроси, че ему надо.",
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    temperature=1.4
+                )
+            )
+            await update.message.reply_text(response.text)
+        except Exception:
+            await update.message.reply_text("Я грызун! Мой голова - идеальный компьютер, я способна думать на все 100! Ча те надо,бе́нда́н?🥱")
 
     async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_text = update.message.text
@@ -90,43 +95,37 @@ async def setup_bot():
         
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         
-        if 'chat_history' not in context.user_data:
-            context.user_data['chat_history'] = []
+        # Храним историю в виде простой текстовой строки, чтобы Gemini никогда не падала
+        if 'chat_history_text' not in context.user_data:
+            context.user_data['chat_history_text'] = ""
+            
+        history = context.user_data['chat_history_text']
         
-        history = context.user_data['chat_history']
-        
-        history.append(
-            types.Content(role="user", parts=[types.Part.from_text(text=user_text)])
-        )
+        # Формируем полный промпт для модели с учетом предыдущего диалога
+        prompt_with_history = f"{history}\nСобеседник говорит: {user_text}\nТанджи отвечает:"
         
         try:
-            # Увеличиваем temperature до 1.4 для максимальной вариативности и живости речи
             response = ai_client.models.generate_content(
                 model='gemini-2.5-flash',
-                contents=history,
+                contents=prompt_with_history,
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_INSTRUCTION,
-                    temperature=1.4,  # Больше креатива, меньше заученных фраз
-                    top_p=0.95        # Делает выбор слов разнообразнее
+                    temperature=1.4,  # Максимальный креатив
+                    top_p=0.95
                 )
             )
             
-            bot_reply = response.text
+            bot_reply = response.text.strip()
             
-            history.append(
-                types.Content(role="model", parts=[types.Part.from_text(text=bot_reply)])
-            )
-            
-            if len(history) > 20:
-                context.user_data['chat_history'] = history[-20:]
+            # Дописываем диалог в текстовую историю (ограничиваем размер, чтобы не росла бесконечно)
+            context.user_data['chat_history_text'] = f"{history}\nСобеседник: {user_text}\nТанджи: {bot_reply}"[-3000:]
                 
             await update.message.reply_text(bot_reply)
             
         except Exception as e:
-            logging.error(f"Ошибка Gemini: {e}")
-            if history:
-                history.pop()
-            await update.message.reply_text("Чщщщщ, мой идеальный компьютер дал сбой... Попробуй еще раз, колхозан, думалку давненько не врублял")
+            # Выводим реальную ошибку в логи Vercel, чтобы увидеть, если что-то не так
+            logging.error(f"ОШИБКА GEMINI: {str(e)}")
+            await update.message.reply_text(f"Чщщщщ, мой идеальный компьютер дал сбой... (Техническая багулина: {str(e)[:50]})")
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
