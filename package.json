@@ -1,13 +1,13 @@
 {
-  "name": "tangi-telegram-bot",
+  "name": "tang-jee-rina-bot",
   "version": "1.0.0",
-  "description": "Tangi Telegram Bot powered by Gemini API and Vercel",
+  "description": "Telegram bot for Tang Jee Rina with Gemini API",
   "main": "api/bot.js",
+  "engines": {
+    "node": "18.x"
+  },
   "dependencies": {
     "@google/genai": "^0.1.1",
-    "grammy": "^1.30.0"
-  },
-  "scripts": {
-    "start": "node api/bot.js"
+    "telegraf": "^4.12.2"
   }
 }
