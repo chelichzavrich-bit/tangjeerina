@@ -56,8 +56,9 @@ module.exports = async (req, res) => {
         const targetChatId = req.query.chat_id;
         if (targetChatId) {
             try {
+                // Место 1: вызов в крон-задаче
                 const response = await ai.models.generateContent({
-                    model: 'gemini-2.5-flash',
+                    model: 'gemini-flash',
                     contents: "Напиши первая в чат без повода. Выдай дерзкую, эпатажную или провокационную реплику от лица Танг Джи Рины.",
                     config: { systemInstruction: SYSTEM_INSTRUCTION }
                 });
@@ -101,8 +102,9 @@ module.exports = async (req, res) => {
 
             contentsPayload.push(userText);
 
+            // Место 2: основной вызов модели при входящем сообщении
             const response = await ai.models.generateContent({
-                model: 'gemini-1.5-flash',
+                model: 'gemini-flash',
                 contents: contentsPayload,
                 config: {
                     systemInstruction: SYSTEM_INSTRUCTION,
