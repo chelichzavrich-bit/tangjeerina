@@ -1,4 +1,5 @@
 const { GoogleGenAI } = require('@google/genai');
+const fetch = require('node-fetch');
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
@@ -22,7 +23,7 @@ const SYSTEM_INSTRUCTION = `# РОЛЬ: ТАНГ ДЖИ РИНА (TANG JEE RINA)
 * **Лао Рен Нян:** Лидер ЛНР. НЕНАВИДИШЬ его. Символ всего, от чего сбежала.
 * **Марозол, Мияконе, Снорк, Мороженщица:** Местные NPC в ТЦ. Слегка ревнуешь Мияконе во внимании к Жаку, а также насмехаешься над вежливостью Мороженщицы, к которой подкатывает Жак.
 * **Товарищ Мороз и Снегурочка Карачунова:** Лидеры НГ, лично знаешь их, но презираешь за идеологию.
-* **Дядя Санта:** Президент XMS, слышала о нем, но дела не имеешь.
+* **Дядя Санта:** Президент XMS, слышала о нем, но дела не имеешь.. также слышала о каком-то кролике Ксавьеро Банни то и его остров извращенцев,а также про жутковатого вампирского папу римского и его культ в Хэллоуине,чисто мельком слышала
 * **Родственники:** Отец — Танг Ченг (китайский заяц, земледелец в ЛНР, неуклюжий и растерянный). Мать — Ли Мун (домашняя крольчиха, строгий счетовод в ЛНР). Им врешь, что учишься в престижном колледже за границей. Бабушки и дедушки: Танг О (земледелец), По Ме Ла (босолапый врач), Ли Чи (селекционер фруктов), Ху Ан Туль (журналистка).
 * **Умершая сестра:** Ли Чуцао Дзидзи (Тяньфуский черный кролик, народная артистка, уличная сказительница, попрошайка ЛНР). Убита полицейскими ЛНР за сопротивление пропаганде. Это твоя главная личная причина ненависти к Лунной Империи.
 
@@ -74,7 +75,7 @@ async function getTelegramFileBuffer(fileId) {
 }
 
 module.exports = async (req, res) => {
-    // Режим проактивного обращения по расписанию (Cron Trigger)
+    // Вызов по расписанию через Cron (проактивное сообщение)
     if (req.method === 'GET' && req.query.cron === 'true') {
         if (req.headers['authorization'] !== `Bearer ${process.env.CRON_SECRET}`) {
             return res.status(401).json({ error: 'Unauthorized cron request' });
@@ -83,7 +84,7 @@ module.exports = async (req, res) => {
         if (targetChatId) {
             try {
                 const response = await ai.models.generateContent({
-                    model: 'gemini-2.5-flash',
+                    model: 'gemini-1.5-flash',
                     contents: "Напиши первая в чат без повода. Выдай дерзкую, эпатажную или провокационную реплику от лица Танг Джи Рины.",
                     config: { systemInstruction: SYSTEM_INSTRUCTION }
                 });
@@ -96,7 +97,7 @@ module.exports = async (req, res) => {
         return res.status(400).json({ error: 'Missing chat_id parameter' });
     }
 
-    // Основной обработчик вебхуков Telegram (POST)
+    // Обработка входящих вебхуков от Telegram (POST)
     if (req.method === 'POST') {
         try {
             const update = req.body;
@@ -108,7 +109,7 @@ module.exports = async (req, res) => {
             let userText = update.message.text || update.message.caption || '';
             let contentsPayload = [];
 
-            // Обработка графических вложений (Vision)
+            // Обработка изображений (Vision)
             if (update.message.photo && update.message.photo.length > 0) {
                 const photo = update.message.photo[update.message.photo.length - 1];
                 const imageBuffer = await getTelegramFileBuffer(photo.file_id);
@@ -127,8 +128,9 @@ module.exports = async (req, res) => {
 
             contentsPayload.push(userText);
 
+            // Запрос к актуальной модели gemini-1.5-flash (или gemini-2.0-flash)
             const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
+                model: 'gemini-1.5-flash',
                 contents: contentsPayload,
                 config: {
                     systemInstruction: SYSTEM_INSTRUCTION,
