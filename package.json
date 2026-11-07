@@ -1,10 +1,12 @@
 {
   "name": "tang-jee-rina-bot",
   "version": "1.0.0",
-  "description": "Telegram bot",
-  "main": "api/webhook.js",
+  "description": "Telegram bot for Tang Jee Rina powered by Google Gen AI SDK on Vercel",
+  "main"[span_29](start_span)[span_29](end_span): "api/webhook.js",
   "dependencies": {
-    "@google/genai": "^0.1.1",
-    "node-fetch": "^2.7.0"
+    "@google/genai": "^2.32.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   }
 }
