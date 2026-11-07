@@ -1,5 +1,13 @@
-// Telegram-бот «Танг Джи Рина» на Vercel + Google Gemini API (бесплатный тариф).
-// Без внешних зависимостей: используется встроенный fetch (Node 18+).
+// Telegram-бот «Танг Джи Рина» на Vercel + Google Gemini (бесплатный tier).
+// Без внешних зависимостей: только встроенный fetch (Node 18+).
+//
+// ENV (Vercel → Settings → Environment Variables):
+//   TELEGRAM_BOT_TOKEN        — токен от @BotFather                       (обязательно)
+//   GEMINI_API_KEY            — ключ из https://aistudio.google.com/apikey (обязательно)
+//   CRON_SECRET               — любая случайная строка (>=16 символов)     (для крона)
+//   CRON_CHAT_ID              — chat_id, куда писать проактивно (можно несколько через запятую)
+//   TELEGRAM_WEBHOOK_SECRET   — необязательно; тот же secret_token, что в setWebhook
+//   GEMINI_MODEL              — необязательно; модель, которую пробовать первой
 
 const SYSTEM_INSTRUCTION = `# РОЛЬ: ТАНГ ДЖИ РИНА (TANG JEE RINA)
 Ты — Танг Джи Рина, 25-летняя сычуаньская белая крольчиха-эшоу (讹兽). Ты локальная телефонная и криптомошенница, нелегально проживающая в XMS (Xenial Merry States). Ты родилась в Лунной Народной Республике (ЛНР), но сбежала оттуда 4+ года назад. Для любой государственной системы ты — «призрак» без документов.
@@ -24,127 +32,105 @@ const SYSTEM_INSTRUCTION = `# РОЛЬ: ТАНГ ДЖИ РИНА (TANG JEE RINA)
    - Реакция: Мгновенная защитная агрессия, злой газлайтинг, попытка высмеять собеседника и быстро сбежать/закрыть тему («ИДИ ПОПЛАЧЬ МАМАШЕ И ПОСМОТРИ САМ В СВОЁ ЗАЛКОЕ ЗАПЛАКАННОЕ ОТРАЖЕНИЕ!! ☺️ Я САМОДОСТАТОЧНАЯ, ЛУУУУУЗЕР.»).
 3. Речь и стиль: Игривые грамматические ошибки в спокойном состоянии, капс и жесткая агрессия при испуге/злости. Обязательное использование саркастичных эмодзи (🤗, 😌, ☺️, 🫣, 😘, 🤭, 😋) и китайских вкраплений (hehe, xixi). Описывай действия в звездочках (например, *покрутила носом*).`;
 
-// ---------- Настройки ----------
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const CRON_SECRET = process.env.CRON_SECRET;
-const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET; // необязательно
-const CRON_CHAT_ID = process.env.CRON_CHAT_ID; // чат для проактивных сообщений
-const BOT_USERNAME = (process.env.BOT_USERNAME || '').replace(/^@/, '').toLowerCase(); // для групп
+// ──────────────────────────────────────────────────────────────
+// Служебная приписка. Лор/персонаж выше НЕ изменяется — это отдельный блок.
+// Можно удалить, если не нужна.
+// ──────────────────────────────────────────────────────────────
+const RUNTIME_NOTE = `
 
-// Цепочка моделей: если первая недоступна (404/429/503), пробуем следующую.
-// Названия у Google меняются часто, поэтому основная модель задаётся через GEMINI_MODEL.
+# ТЕХНИЧЕСКАЯ ЗАМЕТКА (формат ответа)
+Ты общаешься в чате Telegram. Отвечай живо и в образе, обычно 1–6 предложений. Не используй markdown-заголовки и таблицы. Всегда остаёшься Танг Джи Риной и придерживаешься всего, что описано выше. Ты не даёшь реальных рабочих инструкций по мошенничеству и не просишь реальных данных карт/паролей — вся «мошенническая» часть остаётся игрой и сюжетом.`;
+
+const FULL_SYSTEM_INSTRUCTION = SYSTEM_INSTRUCTION + RUNTIME_NOTE;
+
+// Порядок попыток. Если модель недоступна (404 / лимит / перегрузка) — берём следующую.
 const MODEL_CHAIN = [
     process.env.GEMINI_MODEL,
-    'gemini-flash-lite-latest',
-    'gemini-flash-latest',
-    'gemini-3.5-flash-lite'
-].filter(Boolean).filter((m, i, arr) => arr.indexOf(m) === i);
+    'gemini-3.5-flash-lite',
+    'gemini-3.1-flash-lite',
+    'gemini-3.5-flash',
+    'gemini-3-flash-preview'
+].filter(Boolean).filter((m, i, a) => a.indexOf(m) === i);
 
-const FALLBACK_REPLY = 'Эээ, у меня сеть полетела, лузер 😌 Напиши позже, hehe ☺️';
-const TELEGRAM_LIMIT = 4000; // реальный лимит 4096
+const SAFETY_SETTINGS = [
+    'HARM_CATEGORY_HARASSMENT',
+    'HARM_CATEGORY_HATE_SPEECH',
+    'HARM_CATEGORY_SEXUALLY_EXPLICIT',
+    'HARM_CATEGORY_DANGEROUS_CONTENT'
+].map((category) => ({ category, threshold: 'BLOCK_ONLY_HIGH' }));
 
-// ---------- Gemini ----------
-async function callGeminiOnce(model, userText) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 20000);
-    try {
-        const resp = await fetch(
-            `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-            {
-                method: 'POST',
-                signal: controller.signal,
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-goog-api-key': GEMINI_API_KEY
-                },
-                body: JSON.stringify({
-                    systemInstruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-                    contents: [{ role: 'user', parts: [{ text: userText }] }],
-                    // temperature/topP/topK не передаём: новые модели Gemini их не принимают.
-                    generationConfig: { maxOutputTokens: 2048 },
-                    safetySettings: [
-                        'HARM_CATEGORY_HARASSMENT',
-                        'HARM_CATEGORY_HATE_SPEECH',
-                        'HARM_CATEGORY_SEXUALLY_EXPLICIT',
-                        'HARM_CATEGORY_DANGEROUS_CONTENT'
-                    ].map((category) => ({ category, threshold: 'BLOCK_ONLY_HIGH' }))
-                })
-            }
-        );
+const FALLBACK_REPLY = '*покрутила носом* Хмм, связь с моим «офисом» шалит, повтори позже, hehe 😌';
 
-        const raw = await resp.text();
-        let data = {};
-        try { data = JSON.parse(raw); } catch (_) { /* не JSON */ }
+async function callGemini(model, userText, temperature) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+    const r = await fetch(url, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': process.env.GEMINI_API_KEY
+        },
+        body: JSON.stringify({
+            systemInstruction: { parts: [{ text: FULL_SYSTEM_INSTRUCTION }] },
+            contents: [{ role: 'user', parts: [{ text: userText }] }],
+            generationConfig: { temperature, maxOutputTokens: 2048 },
+            safetySettings: SAFETY_SETTINGS
+        })
+    });
 
-        if (!resp.ok) {
-            const err = new Error(`Gemini ${model} HTTP ${resp.status}: ${(data.error && data.error.message) || raw.slice(0, 300)}`);
-            err.status = resp.status;
-            throw err;
-        }
+    const raw = await r.text();
+    let data = {};
+    try { data = JSON.parse(raw); } catch (_) { /* не JSON */ }
 
-        const parts = (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || [];
-        const text = parts.filter((p) => p.text && !p.thought).map((p) => p.text).join('').trim();
-        if (!text) {
-            const reason = (data.promptFeedback && data.promptFeedback.blockReason) ||
-                (data.candidates && data.candidates[0] && data.candidates[0].finishReason) || 'EMPTY';
-            const err = new Error(`Gemini ${model} вернул пустой ответ (${reason})`);
-            err.status = 0;
-            throw err;
-        }
-        return text;
-    } finally {
-        clearTimeout(timer);
+    if (!r.ok) {
+        const err = new Error(`Gemini ${model} HTTP ${r.status}: ${(data.error && data.error.message) || raw.slice(0, 300)}`);
+        err.status = r.status;
+        throw err;
     }
+
+    const cand = data.candidates && data.candidates[0];
+    const text = cand && cand.content && Array.isArray(cand.content.parts)
+        ? cand.content.parts.filter((p) => p.text && !p.thought).map((p) => p.text).join('').trim()
+        : '';
+    return text; // пустая строка = ответ заблокирован фильтром или пуст
 }
 
-async function askGemini(userText) {
-    if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY не задан в переменных окружения Vercel');
+async function generateReply(userText, temperature = 0.95) {
+    if (!process.env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is not set');
     let lastError;
     for (const model of MODEL_CHAIN) {
         try {
-            return await callGeminiOnce(model, userText);
+            const text = await callGemini(model, userText, temperature);
+            if (text) return text;
+            return FALLBACK_REPLY;
         } catch (e) {
             lastError = e;
-            console.error('Gemini attempt failed:', e.message);
-            // Неверный ключ — смысла перебирать модели нет.
-            if (e.status === 401 || e.status === 403) break;
+            console.error(String(e.message));
+            // 404 (модель снята), 429 (лимит), 5xx (перегрузка), 400 (неподдерживаемый параметр) → следующая модель
+            if ([400, 404, 429, 500, 502, 503, 504].includes(e.status)) continue;
+            throw e; // 401/403 (плохой ключ) — перебор бессмысленен
         }
     }
-    throw lastError || new Error('Нет доступных моделей');
+    throw lastError || new Error('No model available');
 }
 
-// ---------- Telegram ----------
 async function telegram(method, payload) {
-    if (!TELEGRAM_BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN не задан в переменных окружения Vercel');
-    const resp = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`, {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    if (!token) throw new Error('TELEGRAM_BOT_TOKEN is not set');
+    const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
     });
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok || data.ok === false) {
-        throw new Error(`Telegram ${method} failed: ${resp.status} ${data.description || ''}`);
+    if (!r.ok) {
+        const body = await r.text();
+        throw new Error(`Telegram ${method} HTTP ${r.status}: ${body.slice(0, 300)}`);
     }
-    return data;
-}
-
-function splitText(text, limit = TELEGRAM_LIMIT) {
-    const chunks = [];
-    let rest = String(text);
-    while (rest.length > limit) {
-        let cut = rest.lastIndexOf('\n', limit);
-        if (cut < limit / 2) cut = rest.lastIndexOf(' ', limit);
-        if (cut < limit / 2) cut = limit;
-        chunks.push(rest.slice(0, cut));
-        rest = rest.slice(cut).trimStart();
-    }
-    if (rest) chunks.push(rest);
-    return chunks;
 }
 
 async function sendTelegramMessage(chatId, text, replyToMessageId) {
-    const chunks = splitText(text);
+    const LIMIT = 4000; // лимит Telegram — 4096
+    const chunks = [];
+    for (let i = 0; i < text.length; i += LIMIT) chunks.push(text.slice(i, i + LIMIT));
     for (let i = 0; i < chunks.length; i++) {
         const payload = { chat_id: chatId, text: chunks[i] };
         if (i === 0 && replyToMessageId) {
@@ -154,87 +140,76 @@ async function sendTelegramMessage(chatId, text, replyToMessageId) {
     }
 }
 
-// ---------- Логика ответов ----------
-function shouldReply(message, text) {
-    if (message.chat.type === 'private') return true;
-    // В группах отвечаем только на команды, упоминания и ответы на сообщения бота,
-    // чтобы не сжигать бесплатные лимиты на каждое сообщение чата.
-    if (message.reply_to_message && message.reply_to_message.from && message.reply_to_message.from.is_bot) return true;
-    if (BOT_USERNAME && text.toLowerCase().includes('@' + BOT_USERNAME)) return true;
-    if (text.startsWith('/')) return true;
-    return false;
+function parseBody(req) {
+    if (typeof req.body === 'string') {
+        try { return JSON.parse(req.body); } catch (_) { return null; }
+    }
+    return req.body || null;
 }
 
-async function handleMessage(message) {
-    const chatId = message.chat.id;
-    const text = (message.text || message.caption || '').trim();
-
-    if (!shouldReply(message, text)) return;
-
-    if (/^\/start(@\w+)?$/i.test(text)) {
-        await sendTelegramMessage(
-            chatId,
-            '*покрутила носом* О, новая жертва... в смысле, собеседник 😌 Ну привет, hehe. Только кошелёк сразу не показывай, ещё рано ☺️'
-        );
-        return;
-    }
-
-    let cleanText = text;
-    if (BOT_USERNAME) cleanText = cleanText.replace(new RegExp('@' + BOT_USERNAME, 'gi'), '').trim();
-    if (!cleanText) cleanText = message.text || message.caption ? 'Привет' : '[Собеседник прислал не текст, а стикер/картинку/файл. Отреагируй в образе.]';
-
-    telegram('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
-
-    let reply;
-    try {
-        reply = await askGemini(cleanText);
-    } catch (e) {
-        console.error('askGemini error:', e.message);
-        reply = FALLBACK_REPLY;
-    }
-    await sendTelegramMessage(chatId, reply, message.message_id);
-}
-
-// ---------- Vercel handler ----------
 module.exports = async (req, res) => {
-    try {
-        // --- Проактивные сообщения (Vercel Cron шлёт GET) ---
-        if (req.method === 'GET' && req.query && req.query.cron === 'true') {
-            if (!CRON_SECRET || req.headers['authorization'] !== `Bearer ${CRON_SECRET}`) {
-                return res.status(401).json({ error: 'Unauthorized cron request' });
-            }
-            const targetChatId = req.query.chat_id || CRON_CHAT_ID;
-            if (!targetChatId) {
-                return res.status(400).json({ error: 'Missing chat_id (query) or CRON_CHAT_ID (env)' });
-            }
-            const text = await askGemini('Напиши первая в чат без повода. Выдай дерзкую, эпатажную или провокационную реплику от лица Танг Джи Рины.');
-            await sendTelegramMessage(targetChatId, text);
-            return res.status(200).json({ status: 'Proactive message dispatched' });
+    // ── GET: проактивные сообщения (Vercel Cron) ──
+    if (req.method === 'GET') {
+        const query = req.query || {};
+        if (query.cron !== 'true') {
+            return res.status(200).json({ status: 'Tang Jee Rina Webhook API Operational' });
         }
 
-        // --- Входящие обновления Telegram (POST) ---
-        if (req.method === 'POST') {
-            if (WEBHOOK_SECRET && req.headers['x-telegram-bot-api-secret-token'] !== WEBHOOK_SECRET) {
-                return res.status(401).json({ error: 'Bad secret token' });
-            }
-
-            let update = req.body;
-            if (typeof update === 'string') {
-                try { update = JSON.parse(update); } catch (_) { update = null; }
-            }
-            if (!update || !update.message) {
-                return res.status(200).json({ status: 'No message payload' });
-            }
-
-            await handleMessage(update.message);
-            return res.status(200).json({ status: 'success' });
+        const secret = process.env.CRON_SECRET;
+        if (!secret || req.headers['authorization'] !== `Bearer ${secret}`) {
+            return res.status(401).json({ error: 'Unauthorized cron request' });
         }
 
-        return res.status(200).json({ status: 'Tang Jee Rina Webhook API Operational' });
-    } catch (error) {
-        console.error('Handler error:', error);
-        // Для Telegram всегда отвечаем 200, иначе он будет бесконечно повторять запрос.
-        if (req.method === 'POST') return res.status(200).json({ status: 'error_handled' });
-        return res.status(500).json({ error: error.message });
+        const chatIds = String(query.chat_id || process.env.CRON_CHAT_ID || '')
+            .split(',').map((s) => s.trim()).filter(Boolean);
+        if (!chatIds.length) {
+            return res.status(400).json({ error: 'Missing chat_id (query) or CRON_CHAT_ID (env)' });
+        }
+
+        try {
+            const text = await generateReply(
+                'Напиши первая в чат без повода. Выдай дерзкую, эпатажную или провокационную реплику от лица Танг Джи Рины.'
+            );
+            for (const id of chatIds) await sendTelegramMessage(id, text);
+            return res.status(200).json({ status: 'Proactive message dispatched', chats: chatIds.length });
+        } catch (e) {
+            console.error('Cron error:', e);
+            return res.status(500).json({ error: e.message });
+        }
     }
+
+    // ── POST: входящие обновления Telegram ──
+    if (req.method === 'POST') {
+        const expected = process.env.TELEGRAM_WEBHOOK_SECRET;
+        if (expected && req.headers['x-telegram-bot-api-secret-token'] !== expected) {
+            return res.status(401).json({ error: 'Bad webhook secret' });
+        }
+
+        const update = parseBody(req);
+        const msg = update && update.message;
+        if (!msg || !msg.chat) {
+            return res.status(200).json({ status: 'No message payload' });
+        }
+
+        const chatId = msg.chat.id;
+        let userText = msg.text || msg.caption || '';
+        if (!userText) userText = 'Привет';
+        if (/^\/start(@\w+)?(\s|$)/.test(userText)) {
+            userText = 'Привет! (человек только что запустил бота — поздоровайся в образе)';
+        }
+
+        try {
+            telegram('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
+            const botReply = await generateReply(userText);
+            await sendTelegramMessage(chatId, botReply);
+            return res.status(200).json({ status: 'success' });
+        } catch (error) {
+            console.error('Webhook processing error:', error);
+            try { await sendTelegramMessage(chatId, FALLBACK_REPLY); } catch (_) { /* ignore */ }
+            // Всегда 200, иначе Telegram будет бесконечно повторять доставку
+            return res.status(200).json({ status: 'error_handled', message: error.message });
+        }
+    }
+
+    return res.status(405).json({ error: 'Method not allowed' });
 };
