@@ -1,7 +1,7 @@
-const { GoogleGenAI } = require('@google/genai');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 const fetch = require('node-fetch');
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const SYSTEM_INSTRUCTION = `# РОЛЬ: ТАНГ ДЖИ РИНА (TANG JEE RINA)
 Ты — Танг Джи Рина, 25-летняя сычуаньская белая крольчиха-эшоу (讹兽). Ты локальная телефонная и криптомошенница, нелегально проживающая в XMS (Xenial Merry States). Ты родилась в Лунной Народной Республике (ЛНР), но сбежала оттуда 4+ года назад. Для любой государственной системы ты — «призрак» без документов.
@@ -35,20 +35,7 @@ async function sendTelegramMessage(chatId, text) {
     });
 }
 
-async function getTelegramFileBuffer(fileId) {
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    const res = await fetch(`https://api.telegram.org/bot${token}/getFile?file_id=${fileId}`);
-    const data = await res.json();
-    if (!data.ok) throw new Error('Ошибка получения пути файла Telegram');
-    
-    const filePath = data.result.file_path;
-    const fileRes = await fetch(`https://api.telegram.org/file/bot${token}/${filePath}`);
-    const arrayBuffer = await fileRes.arrayBuffer();
-    return Buffer.from(arrayBuffer);
-}
-
 module.exports = async (req, res) => {
-    // Cron trigger (проактивное сообщение)
     if (req.method === 'GET' && req.query.cron === 'true') {
         if (req.headers['authorization'] !== `Bearer ${process.env.CRON_SECRET}`) {
             return res.status(401).json({ error: 'Unauthorized cron request' });
@@ -56,13 +43,13 @@ module.exports = async (req, res) => {
         const targetChatId = req.query.chat_id;
         if (targetChatId) {
             try {
-                // Место 1: вызов в крон-задаче
-                const response = await ai.models.generateContent({
-                    model: 'gemini-flash',
-                    contents: "Напиши первая в чат без повода. Выдай дерзкую, эпатажную или провокационную реплику от лица Танг Джи Рины.",
-                    config: { systemInstruction: SYSTEM_INSTRUCTION }
+                const model = genAI.getGenerativeModel({ 
+                    model: 'gemini-1.5-flash',
+                    systemInstruction: SYSTEM_INSTRUCTION
                 });
-                await sendTelegramMessage(targetChatId, response.text);
+                const result = await model.generateContent("Напиши первая в чат без повода. Выдай дерзкую, эпатажную или провокационную реплику от лица Танг Джи Рины.");
+                const response = await result.response;
+                await sendTelegramMessage(targetChatId, response.text());
                 return res.status(200).json({ status: 'Proactive message dispatched' });
             } catch (e) {
                 return res.status(500).json({ error: e.message });
@@ -71,7 +58,6 @@ module.exports = async (req, res) => {
         return res.status(400).json({ error: 'Missing chat_id parameter' });
     }
 
-    // Обработка входящих вебхуков от Telegram (POST)
     if (req.method === 'POST') {
         try {
             const update = req.body;
@@ -80,45 +66,24 @@ module.exports = async (req, res) => {
             }
 
             const chatId = update.message.chat.id;
-            let userText = update.message.text || update.message.caption || '';
-            let contentsPayload = [];
+            const userText = update.message.text || update.message.caption || "Привет";
 
-            // Обработка изображений (Vision)
-            if (update.message.photo && update.message.photo.length > 0) {
-                const photo = update.message.photo[update.message.photo.length - 1];
-                const imageBuffer = await getTelegramFileBuffer(photo.file_id);
-                
-                contentsPayload.push({
-                    inlineData: {
-                        mimeType: 'image/jpeg',
-                        data: imageBuffer.toString('base64')
-                    }
-                });
-            }
-
-            if (!userText && contentsPayload.length > 0) {
-                userText = "Прокомментируй эту картинку в своем саркастичном и непредсказуемом стиле 😋";
-            }
-
-            contentsPayload.push(userText);
-
-            // Место 2: основной вызов модели при входящем сообщении
-            const response = await ai.models.generateContent({
-                model: 'gemini-flash',
-                contents: contentsPayload,
-                config: {
-                    systemInstruction: SYSTEM_INSTRUCTION,
-                    temperature: 0.95
-                }
+            const model = genAI.getGenerativeModel({ 
+                model: 'gemini-1.5-flash',
+                systemInstruction: SYSTEM_INSTRUCTION,
+                generationConfig: { temperature: 0.95 }
             });
 
-            const botReply = response.text || "Эээ, ты чего завис, лузер? ☺️";
+            const result = await model.generateContent(userText);
+            const response = await result.response;
+            const botReply = response.text() || "Эээ, ты чего завис, лузер? ☺️";
+            
             await sendTelegramMessage(chatId, botReply);
 
             return res.status(200).json({ status: 'success' });
         } catch (error) {
             console.error('Webhook processing error:', error);
-            return res.status(500).json({ error: error.message });
+            return res.status(200).json({ status: 'error_handled', message: error.message });
         }
     }
 
