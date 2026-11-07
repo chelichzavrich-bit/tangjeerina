@@ -1,1 +1,8 @@
-{}
+{
+  "rewrites": [
+    {
+      "source": "/api/bot",
+      "destination": "/api/bot.py"
+    }
+  ]
+}
