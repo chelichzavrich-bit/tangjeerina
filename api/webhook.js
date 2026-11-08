@@ -4,6 +4,7 @@ const { cfg } = require('../lib/config');
 const memory = require('../lib/memory');
 const { telegram, sendMessage } = require('../lib/telegram');
 const { readIncoming } = require('../lib/files');
+const { readLinks } = require('../lib/links');
 const { generateReply, buildContents } = require('../lib/ai');
 const { randomFallback } = require('../lib/fallbacks');
 const { handlePulseRequest } = require('../lib/pulse');
@@ -59,7 +60,15 @@ module.exports = async (req, res) => {
     try {
         telegram('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
 
-        const incoming = await readIncoming(msg);
+        // Вложения и ссылки читаем параллельно, чтобы не терять время
+        const [incoming, links] = await Promise.all([
+            readIncoming(msg),
+            readLinks(msg).catch((e) => {
+                console.error('Links error:', e.message);
+                return { text: '', media: null, histNote: '', count: 0 };
+            })
+        ]);
+
         let userText = incoming.userText;
         if (c.botUsername) userText = userText.replace(new RegExp('@' + c.botUsername + '\\b', 'gi'), '').trim();
         if (/^\/start(@\w+)?(\s|$)/.test(userText)) {
@@ -71,31 +80,36 @@ module.exports = async (req, res) => {
         const repliedText = replied && (replied.text || replied.caption);
         const context = repliedText ? `[Он отвечает на сообщение: "${repliedText.slice(0, 500)}"]` : '';
         const who = isGroup ? `[${displayName(msg.from)}]: ` : '';
-        const spoken = userText || (incoming.hint ? '' : 'Привет');
-        const textBlock = [context, spoken ? who + spoken : (isGroup ? `[${displayName(msg.from)}] прислал вложение` : ''), incoming.hint, incoming.docText]
-            .filter(Boolean).join('\n');
+        const spoken = userText || (incoming.hint || links.text ? '' : 'Привет');
+        const textBlock = [
+            context,
+            spoken ? who + spoken : (isGroup ? `[${displayName(msg.from)}] прислал вложение` : ''),
+            incoming.hint,
+            incoming.docText,
+            links.text
+        ].filter(Boolean).join('\n');
 
         const history = await memory.getHistory(chatId);
-        const hasMedia = !!incoming.media;
-        const opts = { userLen: userText.length + incoming.docText.length, hasMedia, deadline };
+        const mediaParts = [incoming.media, links.media].filter(Boolean);
+        const hasMedia = mediaParts.length > 0;
+        const opts = { userLen: userText.length + incoming.docText.length + links.text.length, hasMedia, deadline };
 
         let reply;
         try {
-            const parts = [{ text: textBlock }];
-            if (incoming.media) parts.push(incoming.media);
+            const parts = [{ text: textBlock }, ...mediaParts];
             reply = (await generateReply(buildContents(history, parts), opts)).text;
         } catch (e) {
             if (!hasMedia || e.status === 401) throw e;
             // Модель не приняла вложение - второй заход без него, но с честной пометкой
             console.error('Retry without media:', e.message);
-            const parts = [{ text: textBlock + '\n[Само вложение обработать не удалось: его содержимое тебе недоступно, не выдумывай его.]' }];
+            const parts = [{ text: textBlock + '\n[Само вложение или картинку по ссылке обработать не удалось: их содержимое тебе недоступно, не выдумывай его.]' }];
             reply = (await generateReply(buildContents(history, parts), { ...opts, hasMedia: false })).text;
         }
 
         await sendMessage(chatId, reply);
 
         // Память и расписание пульса: человек активен, значит следующий «сам по себе» пост - через случайную паузу
-        const histUser = [who + spoken, incoming.histNote].filter(Boolean).join(' ') || who + '[вложение]';
+        const histUser = [who + spoken, incoming.histNote, links.histNote].filter(Boolean).join(' ') || who + '[вложение]';
         const nextPulse = Date.now() + (c.pulseMin + Math.random() * (c.pulseMax - c.pulseMin)) * 60000;
         await Promise.all([
             memory.addHistory(chatId, [{ r: 'u', t: histUser }, { r: 'm', t: reply }]),
