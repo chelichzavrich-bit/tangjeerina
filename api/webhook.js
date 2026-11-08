@@ -4,7 +4,7 @@ const { cfg } = require('../lib/config');
 const memory = require('../lib/memory');
 const { telegram, sendMessage } = require('../lib/telegram');
 const { readIncoming } = require('../lib/files');
-const { readLinks } = require('../lib/links');
+const { extractUrls, parseLinks, describeLinks } = require('../lib/links');
 const { generateReply, buildContents } = require('../lib/ai');
 const { randomFallback } = require('../lib/fallbacks');
 const { handlePulseRequest } = require('../lib/pulse');
@@ -27,6 +27,21 @@ function shouldAnswer(msg, botUsername) {
     if (/^\/\w+/.test(text)) return true;
     const repliedFrom = msg.reply_to_message && msg.reply_to_message.from;
     return !!(repliedFrom && repliedFrom.is_bot && (repliedFrom.username || '').toLowerCase() === botUsername.toLowerCase());
+}
+
+// Читает ссылки из сообщения. Любая ошибка здесь не должна ломать ответ - тогда просто отвечаем без ссылок.
+async function readLinks(msg, c) {
+    const empty = { text: '', media: [], note: '' };
+    if (!c.linksEnabled) return empty;
+    try {
+        const urls = extractUrls(msg, c.maxLinks);
+        if (!urls.length) return empty;
+        const results = await parseLinks(urls);
+        return describeLinks(results);
+    } catch (e) {
+        console.error('Link parsing error:', e.message);
+        return empty;
+    }
 }
 
 module.exports = async (req, res) => {
@@ -60,15 +75,8 @@ module.exports = async (req, res) => {
     try {
         telegram('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
 
-        // Вложения и ссылки читаем параллельно, чтобы не терять время
-        const [incoming, links] = await Promise.all([
-            readIncoming(msg),
-            readLinks(msg).catch((e) => {
-                console.error('Links error:', e.message);
-                return { text: '', media: null, histNote: '', count: 0 };
-            })
-        ]);
-
+        // Вложение (фото, файл, голосовое...) и ссылки читаются параллельно
+        const [incoming, linkInfo] = await Promise.all([readIncoming(msg), readLinks(msg, c)]);
         let userText = incoming.userText;
         if (c.botUsername) userText = userText.replace(new RegExp('@' + c.botUsername + '\\b', 'gi'), '').trim();
         if (/^\/start(@\w+)?(\s|$)/.test(userText)) {
@@ -80,19 +88,14 @@ module.exports = async (req, res) => {
         const repliedText = replied && (replied.text || replied.caption);
         const context = repliedText ? `[Он отвечает на сообщение: "${repliedText.slice(0, 500)}"]` : '';
         const who = isGroup ? `[${displayName(msg.from)}]: ` : '';
-        const spoken = userText || (incoming.hint || links.text ? '' : 'Привет');
-        const textBlock = [
-            context,
-            spoken ? who + spoken : (isGroup ? `[${displayName(msg.from)}] прислал вложение` : ''),
-            incoming.hint,
-            incoming.docText,
-            links.text
-        ].filter(Boolean).join('\n');
+        const spoken = userText || (incoming.hint || linkInfo.text ? '' : 'Привет');
+        const textBlock = [context, spoken ? who + spoken : (isGroup ? `[${displayName(msg.from)}] прислал вложение` : ''), incoming.hint, incoming.docText, linkInfo.text]
+            .filter(Boolean).join('\n');
 
         const history = await memory.getHistory(chatId);
-        const mediaParts = [incoming.media, links.media].filter(Boolean);
+        const mediaParts = [incoming.media, ...linkInfo.media].filter(Boolean);
         const hasMedia = mediaParts.length > 0;
-        const opts = { userLen: userText.length + incoming.docText.length + links.text.length, hasMedia, deadline };
+        const opts = { userLen: userText.length + incoming.docText.length + linkInfo.text.length, hasMedia, deadline };
 
         let reply;
         try {
@@ -102,14 +105,14 @@ module.exports = async (req, res) => {
             if (!hasMedia || e.status === 401) throw e;
             // Модель не приняла вложение - второй заход без него, но с честной пометкой
             console.error('Retry without media:', e.message);
-            const parts = [{ text: textBlock + '\n[Само вложение или картинку по ссылке обработать не удалось: их содержимое тебе недоступно, не выдумывай его.]' }];
+            const parts = [{ text: textBlock + '\n[Само вложение или картинка по ссылке обработать не удалось: их содержимое тебе недоступно, не выдумывай его.]' }];
             reply = (await generateReply(buildContents(history, parts), { ...opts, hasMedia: false })).text;
         }
 
         await sendMessage(chatId, reply);
 
         // Память и расписание пульса: человек активен, значит следующий «сам по себе» пост - через случайную паузу
-        const histUser = [who + spoken, incoming.histNote, links.histNote].filter(Boolean).join(' ') || who + '[вложение]';
+        const histUser = [who + spoken, incoming.histNote, linkInfo.note].filter(Boolean).join(' ') || who + '[вложение]';
         const nextPulse = Date.now() + (c.pulseMin + Math.random() * (c.pulseMax - c.pulseMin)) * 60000;
         await Promise.all([
             memory.addHistory(chatId, [{ r: 'u', t: histUser }, { r: 'm', t: reply }]),
