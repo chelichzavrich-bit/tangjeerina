@@ -1,0 +1,12 @@
+{
+  "functions": {
+    "api/webhook.js": { "maxDuration": 30 },
+    "api/pulse.js": { "maxDuration": 30 }
+  },
+  "crons": [
+    {
+      "path": "/api/pulse?daily=1",
+      "schedule": "0 12 * * *"
+    }
+  ]
+}
