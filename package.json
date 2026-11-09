@@ -1,13 +1,14 @@
 {
   "name": "tangjeerina",
   "version": "3.1.0",
-  "description": "Telegram bot (Tang Jee Rina) on Vercel with Google Gemini: memory, files, link reading, proactive pulse",
+  "description": "Telegram bot (Tang Jee Rina) on Vercel with Google Gemini",
   "main": "api/webhook.js",
   "private": true,
   "scripts": {
     "check": "node --check api/webhook.js && node --check api/pulse.js && node --check lib/links.js && node --check lib/persona.js && node --check lib/ai.js && node --check lib/config.js"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.21.0",
     "mammoth": "^1.8.0"
   },
   "engines": {
