@@ -19,7 +19,7 @@ function parseBody(req) {
 
 const displayName = (from) => (from && (from.first_name || from.username)) || 'Аноним';
 
-// Проверка триггерных слов для принудительной активации
+// Проверка триггерных слов для принудительной активации (ЦЕЛЬ 2А)
 function checkTriggers(msg) {
     const text = (msg.text || msg.caption || '').toLowerCase();
     const replyText = (msg.reply_to_message && (msg.reply_to_message.text || msg.reply_to_message.caption) || '').toLowerCase();
@@ -73,7 +73,7 @@ function analyzeUserProfile(msg) {
     return profileNotes.length > 0 ? profileNotes.join('; ') : 'профиль пользователя не дает интересных зацепок';
 }
 
-// Получение аватарки пользователя для Gemini Vision
+// Получение аватарки пользователя для Gemini Vision (ЦЕЛЬ 1)
 async function getUserAvatar(userId) {
     try {
         const res = await telegram('getUserProfilePhotos', { user_id: userId, limit: 1 });
@@ -85,7 +85,9 @@ async function getUserAvatar(userId) {
                 const imgRes = await fetch(`https://api.telegram.org/file/bot${token}/${file.result.file_path}`);
                 if (imgRes.ok) {
                     const buf = Buffer.from(await imgRes.arrayBuffer());
-                    return { inline_data: { mime_type: 'image/jpeg', data: buf.toString('base64') } };
+                    // Telegram profile photos are typically JPEG, but we can be safe
+                    const mime = photo.file_size > 100000 ? 'image/jpeg' : 'image/jpeg'; 
+                    return { inline_data: { mime_type: mime, data: buf.toString('base64') } };
                 }
             }
         }
@@ -140,7 +142,7 @@ module.exports = async (req, res) => {
     try {
         telegram('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
 
-        // Вложение и ссылки читаются параллельно
+        // Вложение, ссылки и аватарка читаются параллельно для максимальной скорости (ЦЕЛЬ 1, 3)
         const [incoming, linkInfo, userAvatar] = await Promise.all([
             readIncoming(msg), 
             readLinks(msg, c),
@@ -160,12 +162,12 @@ module.exports = async (req, res) => {
         
         let contextBlocks = [];
         
-        // Интеллектуальное чтение цитат
+        // Интеллектуальное чтение цитат (ЦЕЛЬ 2Б)
         if (repliedText) {
             contextBlocks.push(`[ОН ОТВЕЧАЕТ НА СООБЩЕНИЕ: "${repliedText.slice(0, 500)}"]. Прокомментируй содержание этого сообщения от лица Танг. Не отвечай автору напрямую, если он не обратился к ней. Оцени суть сказанного.`);
         }
         
-        // Глубокий профилинг
+        // Глубокий профилинг (ЦЕЛЬ 1)
         if (userProfile) {
             contextBlocks.push(`[ДОСЬЕ ПОЛЬЗОВАТЕЛЯ: ${userProfile}]. Используй эту информацию для персонализированного, язвительного комментария ДО начала основного диалога.`);
         }
@@ -182,6 +184,7 @@ module.exports = async (req, res) => {
         ].filter(Boolean).join('\n');
 
         const history = await memory.getHistory(chatId);
+        // Собираем все медиа: вложения, аватарку и превью из ссылок (ЦЕЛЬ 3)
         const mediaParts = [incoming.media, userAvatar, ...linkInfo.media].filter(Boolean);
         const hasMedia = mediaParts.length > 0;
         const opts = { userLen: userText.length + incoming.docText.length + linkInfo.text.length, hasMedia, deadline };
@@ -192,6 +195,7 @@ module.exports = async (req, res) => {
             reply = (await generateReply(buildContents(history, parts), opts)).text;
         } catch (e) {
             if (!hasMedia || e.status === 401) throw e;
+            // Модель не приняла вложение - второй заход без него, но с честной пометкой
             console.error('Retry without media:', e.message);
             const parts = [{ text: textBlock + '\n[Само вложение или картинка по ссылке обработать не удалось: их содержимое тебе недоступно, не выдумывай его.]' }];
             reply = (await generateReply(buildContents(history, parts), { ...opts, hasMedia: false })).text;
@@ -199,6 +203,7 @@ module.exports = async (req, res) => {
 
         await sendMessage(chatId, reply);
 
+        // Память и расписание пульса (ЦЕЛЬ 4): человек активен, значит следующий «сам по себе» пост - через случайную паузу
         const histUser = [who + spoken, incoming.histNote, linkInfo.note].filter(Boolean).join(' ') || who + '[вложение]';
         const nextPulse = Date.now() + (c.pulseMin + Math.random() * (c.pulseMax - c.pulseMin)) * 60000;
         
@@ -212,6 +217,7 @@ module.exports = async (req, res) => {
     } catch (error) {
         console.error('Webhook processing error:', error);
         try { await sendMessage(chatId, randomFallback()); } catch (_) { /* ignore */ }
+        // Всегда 200, иначе Telegram будет бесконечно повторять доставку
         return res.status(200).json({ status: 'error_handled', message: error.message });
     }
 };
