@@ -1,4 +1,5 @@
 // Telegram webhook: Танг Джи Рина (Vercel + Google Gemini).
+// Логика разложена по модулям в папке lib/. Текст персонажа лежит в lib/persona.js.
 const { cfg } = require('../lib/config');
 const memory = require('../lib/memory');
 const { telegram, sendMessage } = require('../lib/telegram');
@@ -8,11 +9,26 @@ const { generateReply, buildContents } = require('../lib/ai');
 const { randomFallback } = require('../lib/fallbacks');
 const { handlePulseRequest } = require('../lib/pulse');
 
-// ЯВНЫЙ СПИСОК ТРИГГЕРОВ (гарантирует активацию, не зависит от экспорта persona.js)
+// ═══════════════════════════════════════════════════════════════
+// ЖЁСТКИЙ WATCHLIST (без импорта из persona.js — там нет экспорта TRIGGER_KEYWORDS,
+// из-за чего оригинальный checkTriggers падал с ошибкой, и бот молчал в группах).
+// Содержит: её собственный тег, её имя, ключевых персонажей, триггерные темы.
+// Все слова в нижнем регистре. Проверка через includes.
+// ═══════════════════════════════════════════════════════════════
 const WATCHLIST = [
-    'tangjeebot', 'танг', 'танджи', 'жак', 'жрак', 'даорен', 'дао рен', 'лао рен',
-    'манго', 'ман го', 'мандарин', 'звезда', 'лампа', 'бывший', 'харза', 'деньги',
-    'золото', 'лнр', 'чингчонг', 'крольчиха'
+    'tangjeebot', 'танг', 'танджи', 'танг джи рина',
+    'жак', 'жрак', 'жак кэрротлин',
+    'даорен', 'дао рен', 'лао рен', 'лао рен нян',
+    'манго', 'ман го', 'мандарин',
+    'звезда', 'лампа', 'бывший',
+    'харза', 'деньги', 'золото',
+    'лнр', 'лунная народная республика',
+    'чингчонг', 'крольчиха',
+    'пингвин', 'пингвинья империя',
+    'ли чуцао', 'танг ченг', 'ли мун',
+    'марозол', 'мияконе', 'снорк', 'мороженщица',
+    'дядя санта', 'товарищ мороз', 'снегурочка',
+    'император форстер'
 ];
 
 function parseBody(req) {
@@ -24,71 +40,141 @@ function parseBody(req) {
 
 const displayName = (from) => (from && (from.first_name || from.username)) || 'Аноним';
 
-// Проверка триггеров в основном тексте И в тексте цитаты
+// ═══════════════════════════════════════════════════════════════
+// Извлекает все URL-строки из сообщения (текст + подписи + скрытые text_link)
+// БЕЗ парсинга содержимого. Нужно, чтобы проверить триггеры в самих ссылках
+// (например, t.me/tangjeebot) ДО чтения ссылок.
+// ═══════════════════════════════════════════════════════════════
+function extractRawUrls(msg) {
+    const found = [];
+    const add = (raw) => {
+        let s = String(raw || '').trim();
+        if (!s) return;
+        if (!found.includes(s.toLowerCase())) found.push(s.toLowerCase());
+    };
+    const text = msg.text || msg.caption || '';
+    const ents = msg.entities || msg.caption_entities || [];
+    for (const e of ents) {
+        if (e.type === 'text_link' && e.url) add(e.url);
+        else if (e.type === 'url') add(text.slice(e.offset, e.offset + e.length));
+    }
+    const re = /\b(?:https?:\/\/|(?:www\.)?(?:t\.me|telegram\.me|youtu\.be|youtube\.com|m\.youtube\.com)[^\s<>"«»]+)/gi;
+    for (const m of text.matchAll(re)) {
+        let s = m[0].replace(/[.,!?;:\]}»"'…]+$/, '');
+        if (s.endsWith(')') && !s.includes('(')) s = s.slice(0, -1);
+        add(s);
+    }
+    return found;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Проверка триггеров: текст сообщения + текст цитаты + URL ссылок в сообщении.
+// Это гарантирует, что бот отреагирует, даже если триггерное слово только в ссылке
+// (например, t.me/zhak_carrotlin или t.me/tangjeebot).
+// ═══════════════════════════════════════════════════════════════
 function checkTriggers(msg) {
     const text = (msg.text || msg.caption || '').toLowerCase();
     const replyText = (msg.reply_to_message && (msg.reply_to_message.text || msg.reply_to_message.caption) || '').toLowerCase();
-    const fullText = text + ' ' + replyText;
+    const urls = extractRawUrls(msg).join(' ');
+    const fullText = text + ' ' + replyText + ' ' + urls;
     return WATCHLIST.some(kw => fullText.includes(kw));
 }
 
+// ═══════════════════════════════════════════════════════════════
+// В группах отвечаем, если:
+// 1. Упомянули @botUsername (или просто botUsername в тексте как отдельное слово)
+// 2. Ответ на сообщение самого бота
+// 3. Команда (/start и т.д.)
+// 4. Сработал триггер из WATCHLIST (в тексте, цитате ИЛИ в URL ссылок)
+// ═══════════════════════════════════════════════════════════════
 function shouldAnswer(msg, botUsername) {
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
-    if (!isGroup) return true; // В личных чатах отвечаем всегда
+    // В личных чатах всегда отвечаем; если botUsername не задан — тоже отвечаем (страховка)
+    if (!isGroup || !botUsername) return true;
 
-    // СТРАХОВКА: если BOT_USERNAME не задан в ENV, используем 'tangjeebot'
-    const targetUsername = (botUsername || 'tangjeebot').toLowerCase().replace(/^@/, '');
-    
+    const targetUsername = botUsername.toLowerCase().replace(/^@/, '');
     const text = (msg.text || msg.caption || '').toLowerCase();
     const replyText = (msg.reply_to_message && (msg.reply_to_message.text || msg.reply_to_message.caption) || '').toLowerCase();
     const fullText = text + ' ' + replyText;
 
-    // 1. Прямое упоминание @tangjeebot или просто tangjeebot в тексте
-    if (fullText.includes('@' + targetUsername) || fullText.includes(' ' + targetUsername) || fullText.startsWith(targetUsername)) {
-        return true;
-    }
+    // 1. Прямое упоминание бота через @
+    if (fullText.includes('@' + targetUsername)) return true;
 
-    // 2. Команды
+    // 2. Username как отдельное слово (чтобы "tangjeebot" сработало, но "mytangjeebot" — нет)
+    const usernameRe = new RegExp('(^|[^a-z0-9_])' + targetUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '([^a-z0-9_]|$)');
+    if (usernameRe.test(fullText)) return true;
+
+    // 3. Команды
     if (/^\/\w+/.test(text)) return true;
 
-    // 3. Ответ на сообщение самого бота
+    // 4. Ответ на сообщение самого бота
     const repliedFrom = msg.reply_to_message && msg.reply_to_message.from;
     if (repliedFrom && repliedFrom.is_bot) {
         const repliedUsername = (repliedFrom.username || '').toLowerCase().replace(/^@/, '');
         if (repliedUsername === targetUsername) return true;
     }
 
-    // 4. АКТИВАЦИЯ ПО WATCHLIST (Симптом 2 и 3: реакция на ключевые слова, даже в цитатах, без @)
+    // 5. ТРИГГЕРЫ (в тексте + цитате + URL ссылок) — ключевое исправление для групп
     if (checkTriggers(msg)) return true;
 
     return false;
 }
 
-// Роутер приоритетов для модели
-function getPriorityDirective(userText, repliedText) {
-    const fullText = (userText + ' ' + (repliedText || '')).toLowerCase();
+// ═══════════════════════════════════════════════════════════════
+// ЦЕЛЬ 1: Глубокий профилинг собеседника (метаданные)
+// ═══════════════════════════════════════════════════════════════
+function analyzeUserProfile(msg) {
+    const from = msg.from || {};
+    const username = from.username || '';
+    const firstName = from.first_name || '';
+    const lastName = from.last_name || '';
+    let profileNotes = [];
 
-    if (/ман го|тебя бросили|ты не сама научилась|бросил/.test(fullText)) {
-        return "[ПРИОРИТЕТ 1: Сжатие, тишина, отрицание имени, без капса, без истерики. Профилирование молчит.]";
+    if (username) {
+        if (/\d{3,}|[_-]{2,}|666|dark|lord|edgy/i.test(username)) {
+            profileNotes.push(`юзернейм @${username} кричит о попытках быть крутым или мрачным`);
+        } else if (/sunny|kitten|cute|baby/i.test(username)) {
+            profileNotes.push(`юзернейм @${username} слишком слащавый и подозрительный`);
+        } else {
+            profileNotes.push(`юзернейм @${username} стандартный и скучный`);
+        }
     }
-    if (/любишь жака|чувства к жаку|нравишься жак|симпатия|неравнодушна/.test(fullText)) {
-        return "[ПРИОРИТЕТ 2: Смена темы + абсурд, без капса, без истерики, подтекст не озвучивать. Профилирование молчит.]";
+    if (firstName && lastName) {
+        profileNotes.push(`полное имя "${firstName} ${lastName}" выдает серьезность или попытку казаться взрослым`);
+    } else if (firstName && !lastName) {
+        profileNotes.push(`одно имя "${firstName}" выдает анонимность или игривость`);
     }
-    if (/дракон|лао рен|лнр-пропаганда|лунная народная республика/.test(fullText)) {
-        return "[ПРИОРИТЕТ 3: Капс, паника, китайский, агрессия.]";
-    }
-    if (/ли чуцао|сестра|умершая сестра/.test(fullText)) {
-        return "[ПРИОРИТЕТ 4: Капс, слёзы ярости, отрицание боли.]";
-    }
-    if (/родители|ли мун|скучают|отец|танг ченг/.test(fullText)) {
-        return "[ПРИОРИТЕТ 5: Капс, газлайтинг, требование кошелька.]";
-    }
-    if (/кобыла|шлюха|урод|глупая|толстая|дебил|колхозан/.test(fullText)) {
-        return "[ПРИОРИТЕТ 6: Cold Troll, зеркальное унижение, без капса, лениво, 1-4 предложения.]";
-    }
-    return "[ПРИОРИТЕТ 7: Обычный режим. Профилирование применять только если это первое сообщение или пользователь прямо просит оценить внешность/ник. Не повторять детали профиля из прошлых сообщений.]";
+    return profileNotes.length > 0 ? profileNotes.join('; ') : 'профиль пользователя не дает интересных зацепок';
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Получение аватарки пользователя для Gemini Vision (ЦЕЛЬ 1)
+// ═══════════════════════════════════════════════════════════════
+async function getUserAvatar(userId) {
+    try {
+        const res = await telegram('getUserProfilePhotos', { user_id: userId, limit: 1 });
+        if (res.result && res.result.total_count > 0) {
+            const photo = res.result.photos[0].pop(); // highest resolution
+            const file = await telegram('getFile', { file_id: photo.file_id });
+            if (file.result && file.result.file_path) {
+                const token = process.env.TELEGRAM_BOT_TOKEN;
+                const imgRes = await fetch(`https://api.telegram.org/file/bot${token}/${file.result.file_path}`);
+                if (imgRes.ok) {
+                    const buf = Buffer.from(await imgRes.arrayBuffer());
+                    const mime = 'image/jpeg';
+                    return { inline_data: { mime_type: mime, data: buf.toString('base64') } };
+                }
+            }
+        }
+    } catch (e) {
+        // Игнорируем ошибки получения аватарки, чтобы не ломать основной поток
+    }
+    return null;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Читает ссылки из сообщения. Любая ошибка здесь не должна ломать ответ.
+// ═══════════════════════════════════════════════════════════════
 async function readLinks(msg, c) {
     const empty = { text: '', media: [], note: '' };
     if (!c.linksEnabled) return empty;
@@ -104,6 +190,7 @@ async function readLinks(msg, c) {
 }
 
 module.exports = async (req, res) => {
+    // GET: проверка работоспособности
     if (req.method === 'GET') {
         const query = req.query || {};
         if (query.cron === 'true') return handlePulseRequest(req, res, { daily: true });
@@ -111,6 +198,7 @@ module.exports = async (req, res) => {
     }
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
+    // POST: обновления Telegram
     const expected = process.env.TELEGRAM_WEBHOOK_SECRET;
     if (expected && req.headers['x-telegram-bot-api-secret-token'] !== expected) {
         return res.status(401).json({ error: 'Bad webhook secret' });
@@ -122,12 +210,10 @@ module.exports = async (req, res) => {
     if (await memory.seenUpdate(update.update_id)) return res.status(200).json({ status: 'duplicate' });
 
     const c = cfg();
-    // Используем fallback, если в ENV не задано
+    // Страховка: если BOT_USERNAME не задан в ENV, используем 'tangjeebot'
     const botUsername = c.botUsername || process.env.BOT_USERNAME || 'tangjeebot';
-    
-    if (!shouldAnswer(msg, botUsername)) {
-        return res.status(200).json({ status: 'ignored (not addressed)' });
-    }
+
+    if (!shouldAnswer(msg, botUsername)) return res.status(200).json({ status: 'ignored (not addressed)' });
 
     const chatId = msg.chat.id;
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
@@ -136,56 +222,63 @@ module.exports = async (req, res) => {
     try {
         telegram('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
 
-        const [incoming, linkInfo] = await Promise.all([readIncoming(msg), readLinks(msg, c)]);
+        // Вложение, ссылки и аватарка читаются ПАРАЛЛЕЛЬНО для максимальной скорости (ЦЕЛЬ 1, 3)
+        const [incoming, linkInfo, userAvatar] = await Promise.all([
+            readIncoming(msg),
+            readLinks(msg, c),
+            msg.from ? getUserAvatar(msg.from.id) : Promise.resolve(null)
+        ]);
+
         let userText = incoming.userText;
-        
-        // Удаляем упоминания бота из текста, чтобы не мешали генерации
-        if (botUsername) {
-            userText = userText.replace(new RegExp('@' + botUsername + '\\b', 'gi'), '').trim();
-        }
+        if (botUsername) userText = userText.replace(new RegExp('@' + botUsername + '\\b', 'gi'), '').trim();
 
         if (/^\/start(@\w+)?(\s|$)/.test(userText)) {
-            userText = 'Привет! (человек только что запустил bot - поздоровайся в образе)';
+            userText = 'Привет! (человек только что запустил бота - поздоровайся в образе)';
         }
 
-        const history = await memory.getHistory(chatId);
+        // ЦЕЛЬ 1 и 2Б: Профилирование и чтение цитат
+        const userProfile = analyzeUserProfile(msg);
         const replied = msg.reply_to_message;
         const repliedText = replied && (replied.text || replied.caption);
 
-        // 1. Применяем Роутер Приоритетов
-        const priorityDirective = getPriorityDirective(userText, repliedText);
-        let contextBlocks = [priorityDirective];
+        // Определяем, есть ли эмоциональный триггер (чтобы профилирование молчало при триггерах)
+        const fullTextLower = (userText + ' ' + (repliedText || '')).toLowerCase();
+        const hasEmotionalTrigger = /ман го|тебя бросили|ты не сама научилась|бросил|любишь жака|чувства к жаку|нравишься жак|симпатия|неравнодушна|дракон|лао рен|лнр|ли чуцао|сестра|родители|ли мун|скучают|отец|танг ченг|кобыла|шлюха|урод|глупая|толстая|дебил|колхозан/.test(fullTextLower);
 
-        // 2. Симптом 3: Усиленное чтение цитат
+        // Профилирование применяется ТОЛЬКО если:
+        // - это первое сообщение в истории (history.length === 0) ИЛИ пользователь прямо просит оценить внешность
+        // - И не сработал эмоциональный триггер (иначе профилирование молчит)
+        const history = await memory.getHistory(chatId);
+        const isExplicitProfileRequest = /оцени|внешность|ник|аватарка|как я выгляжу|кто я/.test(fullTextLower);
+        const shouldProfile = !hasEmotionalTrigger && (history.length === 0 || isExplicitProfileRequest);
+
+        let contextBlocks = [];
+
+        // Интеллектуальное чтение цитат (ЦЕЛЬ 2Б)
         if (repliedText) {
             const repliedFrom = replied.from;
             const authorName = repliedFrom ? (repliedFrom.first_name || repliedFrom.username || 'Неизвестный') : 'Неизвестный';
-            contextBlocks.push(`[ВАЖНО: Это ответ на цитату от ${authorName}: "${repliedText.slice(0, 400)}"]. Твоя задача: прокомментировать содержание этой цитаты от лица Танг. Если в цитате есть триггерные слова, реагируй на них. Не отвечай автору цитаты напрямую, если текущий собеседник не просил об этом, но оцени суть сказанного в цитате.`);
+            contextBlocks.push(`[ОН ОТВЕЧАЕТ НА СООБЩЕНИЕ ОТ ${authorName}: "${repliedText.slice(0, 500)}"]. Прокомментируй содержание этого сообщения от лица Танг. Не отвечай автору напрямую, если текущий собеседник не просил об этом. Оцени суть сказанного в цитате. Если в цитате есть триггерные слова (Жак, Ман Го, Лао Рен, родители и т.д.) - реагируй на них.`);
         }
 
-        // 3. Симптом 1: Профилирование ТОЛЬКО при первом контакте или явном запросе, И ТОЛЬКО если нет эмоционального триггера
-        const isExplicitProfileRequest = /оцени|внешность|ник|аватарка|как я выгляжу|кто я/.test((userText + ' ' + (repliedText || '')).toLowerCase());
-        const noEmotionalTrigger = priorityDirective.includes("ПРИОРИТЕТ 7");
-        
-        if (noEmotionalTrigger && (history.length === 0 || isExplicitProfileRequest)) {
-            const userProfile = analyzeUserProfile(msg);
-            if (userProfile) {
-                contextBlocks.push(`[ДОСЬЕ ПОЛЬЗОВАТЕЛЯ (ИСПОЛЬЗОВАТЬ ВСКОЛЬЗЬ, НЕ ЦИТИРОВАТЬ ДОСЛОВНО В БУДУЩЕМ): ${userProfile}]`);
-            }
+        // Глубокий профилинг (ЦЕЛЬ 1) — только при первом контакте или явном запросе
+        if (shouldProfile && userProfile) {
+            contextBlocks.push(`[ДОСЬЕ ПОЛЬЗОВАТЕЛЯ: ${userProfile}]. Используй эту информацию для персонализированного, язвительного комментария ДО начала основного диалога. В следующих сообщениях НЕ ПОВТОРЯЙ эти детали дословно — максимум вскользь ("твой портрет", "твоя физиономия").`);
         }
 
         const who = isGroup ? `[${displayName(msg.from)}]: ` : '';
         const spoken = userText || (incoming.hint || linkInfo.text ? '' : 'Привет');
-        
+
         const textBlock = [
             ...contextBlocks,
             spoken ? who + spoken : (isGroup ? `[${displayName(msg.from)}] прислал вложение` : ''),
             incoming.hint,
             incoming.docText,
-            linkInfo.text
+            linkInfo.text  // <-- ЗДЕСЬ приходят разобранные ссылки на телеграм-каналы, YouTube, сайты
         ].filter(Boolean).join('\n');
 
-        const mediaParts = [incoming.media, ...linkInfo.media].filter(Boolean);
+        // Собираем все медиа: вложения, аватарку и превью из ссылок (ЦЕЛЬ 3)
+        const mediaParts = [incoming.media, userAvatar, ...linkInfo.media].filter(Boolean);
         const hasMedia = mediaParts.length > 0;
         const opts = { userLen: userText.length + incoming.docText.length + linkInfo.text.length, hasMedia, deadline };
 
@@ -195,6 +288,7 @@ module.exports = async (req, res) => {
             reply = (await generateReply(buildContents(history, parts), opts)).text;
         } catch (e) {
             if (!hasMedia || e.status === 401) throw e;
+            // Модель не приняла вложение - второй заход без него, но с честной пометкой
             console.error('Retry without media:', e.message);
             const parts = [{ text: textBlock + '\n[Само вложение или картинка по ссылке обработать не удалось: их содержимое тебе недоступно, не выдумывай его.]' }];
             reply = (await generateReply(buildContents(history, parts), { ...opts, hasMedia: false })).text;
@@ -202,9 +296,9 @@ module.exports = async (req, res) => {
 
         await sendMessage(chatId, reply);
 
+        // Память и расписание пульса (ЦЕЛЬ 4): человек активен, значит следующий «сам по себе» пост - через случайную паузу
         const histUser = [who + spoken, incoming.histNote, linkInfo.note].filter(Boolean).join(' ') || who + '[вложение]';
         const nextPulse = Date.now() + (c.pulseMin + Math.random() * (c.pulseMax - c.pulseMin)) * 60000;
-        
         await Promise.all([
             memory.addHistory(chatId, [{ r: 'u', t: histUser }, { r: 'm', t: reply }]),
             memory.touchChat(chatId),
@@ -215,31 +309,7 @@ module.exports = async (req, res) => {
     } catch (error) {
         console.error('Webhook processing error:', error);
         try { await sendMessage(chatId, randomFallback()); } catch (_) { /* ignore */ }
+        // Всегда 200, иначе Telegram будет бесконечно повторять доставку
         return res.status(200).json({ status: 'error_handled', message: error.message });
     }
 };
-
-// Вспомогательная функция профилирования (оставлена без изменений логики, только вызов ограничен выше)
-function analyzeUserProfile(msg) {
-    const from = msg.from || {};
-    const username = from.username || '';
-    const firstName = from.first_name || '';
-    const lastName = from.last_name || '';
-    let profileNotes = [];
-    
-    if (username) {
-        if (/\d{3,}\|[_-]{2,}\|666\|dark\|lord\|edgy/i.test(username)) {
-            profileNotes.push(`юзернейм @${username} кричит о попытках быть крутым или мрачным`);
-        } else if (/sunny\|kitten\|cute\|baby/i.test(username)) {
-            profileNotes.push(`юзернейм @${username} слишком слащавый и подозрительный`);
-        } else {
-            profileNotes.push(`юзернейм @${username} стандартный и скучный`);
-        }
-    }
-    if (firstName && lastName) {
-        profileNotes.push(`полное имя "${firstName} ${lastName}" выдает серьезность или попытку казаться взрослым`);
-    } else if (firstName && !lastName) {
-        profileNotes.push(`одно имя "${firstName}" выдает анонимность или игривость`);
-    }
-    return profileNotes.length > 0 ? profileNotes.join('; ') : 'профиль пользователя не дает интересных зацепок';
-        }
