@@ -241,7 +241,7 @@ async function handleCallbackQuery(callbackQuery) {
             replyText = `Крипта: ${rate}. Мой оффшор плакать от смех 🤗`; // Fallback на случай полного краха генерации
         }
     } else {
-        replyText = 'Чщщщщ. харе лупатасить, отбитовый, не видь,что не рабочий😠'';
+        replyText = 'Чщщщщ. харе лупатасить, отбитовый, не видь,что не рабочий😠';
     }
     
     try {
