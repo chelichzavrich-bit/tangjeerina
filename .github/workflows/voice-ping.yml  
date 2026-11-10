@@ -2,10 +2,10 @@ name: Voice Ping Trigger
 
 on:
   schedule:
+    # Запуск каждые 5 часов: 00:00, 05:00, 10:00, 15:00, 20:00 по UTC
     - cron: '0 */5 * * *'
-  workflow_dispatch:
+  workflow_dispatch: # Ручной запуск для тестирования
 
-# Добавь это:
 concurrency:
   group: voice-ping-${{ github.ref }}
   cancel-in-progress: false
