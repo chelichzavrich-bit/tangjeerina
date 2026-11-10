@@ -1,16 +1,22 @@
-name: Voice Ping
+name: Voice Ping Trigger
 
 on:
   schedule:
-    - cron: '0 */2 * * *'  # Каждые 2 часа
-  workflow_dispatch:  # Ручной запуск для тестирования
+    - cron: '0 */5 * * *'
+  workflow_dispatch:
+
+# Добавь это:
+concurrency:
+  group: voice-ping-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  voice-ping:
+  trigger-pulse:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Voice Ping
+      - name: Trigger Vercel Pulse Endpoint
         run: |
           curl -X POST "${{ secrets.PULSE_URL }}" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            -H "Content-Type: application/json"
+            -H "Content-Type: application/json" \
+            -d '{"type": "voice"}'
