@@ -8,16 +8,15 @@ const { extractUrls, parseLinks, describeLinks } = require('../lib/links');
 const { generateReply, buildContents } = require('../lib/ai');
 const { randomFallback } = require('../lib/fallbacks');
 const { handlePulseRequest } = require('../lib/pulse');
-const { getFiatData, getCryptoData } = require('../lib/market'); // <-- НОВОЕ: рыночные данные
+const { getCryptoData, getPairData, PAIRS } = require('../lib/market'); // <-- НОВОЕ: рыночные данные
 
 // ═══════════════════════════════════════════════════════════════
-// ЖЁСТКИЙ WATCHLIST (встроен сюда, так как в persona.js нет экспорта TRIGGER_KEYWORDS, 
-// из-за чего оригинальный checkTriggers падал с ошибкой, и бот молчал в группах).
+// ЖЁСТКИЙ WATCHLIST
 // ═══════════════════════════════════════════════════════════════
 const WATCHLIST = [
     'tangjeebot', 'танг', 'танджи', 'танг джи рина',
     'жак', 'жрак', 'жак кэрротлин',
-    'лаорен', 'лао рен', 'лао рен', 'лао рен нян',
+    'лаорен', 'дао рен', 'лао рен', 'лао рен нян',
     'манго', 'ман го', 'мандарин',
     'звезда', 'лампа', 'бывший',
     'харза', 'деньги', 'золото',
@@ -30,14 +29,12 @@ const WATCHLIST = [
     'император форстер'
 ];
 
-// ═══════════════════════════════════════════════════════════════
-// <-- НОВОЕ: Триггеры для активации рыночных данных
-// ═══════════════════════════════════════════════════════════════
+// <-- НОВОЕ: Триггеры для активации рыночных данных в обычном тексте
 const MARKET_TRIGGERS = [
-    'биткоин', 'btc', 'eth', 'эфириум', 'крипта', 'криптовалют', 
-    'курс', 'растёт', 'падает', 'ликвидация', 
-    'доллар', 'евро', 'рубль', 'инфляция', 'цены', 
-    'новости', 'что в мире', 'что случилось', 
+    'биткоин', 'btc', 'eth', 'эфириум', 'крипта', 'криптовалют',
+    'курс', 'растёт', 'падает', 'ликвидация',
+    'доллар', 'евро', 'рубль', 'инфляция', 'цены',
+    'новости', 'что в мире', 'что случилось',
     'kurs', 'crypto'
 ];
 
@@ -50,11 +47,6 @@ function parseBody(req) {
 
 const displayName = (from) => (from && (from.first_name || from.username)) || 'Аноним';
 
-// ═══════════════════════════════════════════════════════════════
-// Извлекает все URL-строки из сообщения (текст + подписи + скрытые text_link)
-// БЕЗ парсинга содержимого. Нужно, чтобы проверить триггеры в самих ссылках
-// (например, t.me/tangjeebot) ДО чтения ссылок.
-// ═══════════════════════════════════════════════════════════════
 function extractRawUrls(msg) {
     const found = [];
     const add = (raw) => {
@@ -77,11 +69,6 @@ function extractRawUrls(msg) {
     return found;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Проверка триггеров: текст сообщения + текст цитаты + URL ссылок в сообщении.
-// Это гарантирует, что бот отреагирует, даже если триггерное слово только в ссылке
-// (например, t.me/zhak_carrotlin или t.me/tangjeebot).
-// ═══════════════════════════════════════════════════════════════
 function checkTriggers(msg) {
     const text = (msg.text || msg.caption || '').toLowerCase();
     const replyText = (msg.reply_to_message && (msg.reply_to_message.text || msg.reply_to_message.caption) || '').toLowerCase();
@@ -90,38 +77,21 @@ function checkTriggers(msg) {
     return WATCHLIST.some(kw => fullText.includes(kw));
 }
 
-// ═══════════════════════════════════════════════════════════════
-// <-- НОВОЕ: Проверка рыночных триггеров
-// ═══════════════════════════════════════════════════════════════
 function checkMarketTrigger(msg) {
     const text = String(msg.text || msg.caption || '').toLowerCase();
     return MARKET_TRIGGERS.some(kw => text.includes(kw));
 }
 
-// ═══════════════════════════════════════════════════════════════
-// <-- НОВОЕ: Парсинг команд /kurs и /crypto с аргументами
-// Примеры: /kurs eur, /crypto btc, /crypto btc eth sol
-// ═══════════════════════════════════════════════════════════════
 function parseMarketCommand(userText) {
     const match = userText.match(/^\/(kurs|crypto)(?:@\w+)?\s*(.+)?$/i);
     if (!match) return null;
-    
     const command = match[1].toLowerCase();
     const arg = match[2] ? match[2].trim().toLowerCase() : null;
-    
     return { command, arg };
 }
 
-// ═══════════════════════════════════════════════════════════════
-// В группах отвечаем, если:
-// 1. Упомянули @botUsername (или просто botUsername в тексте как отдельное слово)
-// 2. Ответ на сообщение самого бота
-// 3. Команда (/start и т.д.)
-// 4. Сработал триггер из WATCHLIST (в тексте, цитате ИЛИ в URL ссылок)
-// ═══════════════════════════════════════════════════════════════
 function shouldAnswer(msg, botUsername) {
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
-    // В личных чатах всегда отвечаем; если botUsername не задан — тоже отвечаем (страховка)
     if (!isGroup || !botUsername) return true;
 
     const targetUsername = botUsername.toLowerCase().replace(/^@/, '');
@@ -129,32 +99,21 @@ function shouldAnswer(msg, botUsername) {
     const replyText = (msg.reply_to_message && (msg.reply_to_message.text || msg.reply_to_message.caption) || '').toLowerCase();
     const fullText = text + ' ' + replyText;
 
-    // 1. Прямое упоминание бота через @
     if (fullText.includes('@' + targetUsername)) return true;
-
-    // 2. Username как отдельное слово (чтобы "tangjeebot" сработало, но "mytangjeebot" — нет)
     const usernameRe = new RegExp('(^|[^a-z0-9_])' + targetUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '([^a-z0-9_]|$)');
     if (usernameRe.test(fullText)) return true;
-
-    // 3. Команды
     if (/^\/\w+/.test(text)) return true;
 
-    // 4. Ответ на сообщение самого бота
     const repliedFrom = msg.reply_to_message && msg.reply_to_message.from;
     if (repliedFrom && repliedFrom.is_bot) {
         const repliedUsername = (repliedFrom.username || '').toLowerCase().replace(/^@/, '');
         if (repliedUsername === targetUsername) return true;
     }
 
-    // 5. ТРИГГЕРЫ (в тексте + цитате + URL ссылок) — ключевое исправление для групп
     if (checkTriggers(msg)) return true;
-
     return false;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// ЦЕЛЬ 1: Глубокий профилинг собеседника (метаданные)
-// ═══════════════════════════════════════════════════════════════
 function analyzeUserProfile(msg) {
     const from = msg.from || {};
     const username = from.username || '';
@@ -179,34 +138,25 @@ function analyzeUserProfile(msg) {
     return profileNotes.length > 0 ? profileNotes.join('; ') : 'профиль пользователя не дает интересных зацепок';
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Получение аватарки пользователя для Gemini Vision (ЦЕЛЬ 1)
-// ═══════════════════════════════════════════════════════════════
 async function getUserAvatar(userId) {
     try {
         const res = await telegram('getUserProfilePhotos', { user_id: userId, limit: 1 });
         if (res.result && res.result.total_count > 0) {
-            const photo = res.result.photos[0].pop(); // highest resolution
+            const photo = res.result.photos[0].pop();
             const file = await telegram('getFile', { file_id: photo.file_id });
             if (file.result && file.result.file_path) {
                 const token = process.env.TELEGRAM_BOT_TOKEN;
                 const imgRes = await fetch(`https://api.telegram.org/file/bot${token}/${file.result.file_path}`);
                 if (imgRes.ok) {
                     const buf = Buffer.from(await imgRes.arrayBuffer());
-                    const mime = 'image/jpeg';
-                    return { inline_data: { mime_type: mime, data: buf.toString('base64') } };
+                    return { inline_data: { mime_type: 'image/jpeg', data: buf.toString('base64') } };
                 }
             }
         }
-    } catch (e) {
-        // Игнорируем ошибки получения аватарки, чтобы не ломать основной поток
-    }
+    } catch (e) { /* ignore */ }
     return null;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Читает ссылки из сообщения. Любая ошибка здесь не должна ломать ответ.
-// ═══════════════════════════════════════════════════════════════
 async function readLinks(msg, c) {
     const empty = { text: '', media: [], note: '' };
     if (!c.linksEnabled) return empty;
@@ -221,6 +171,135 @@ async function readLinks(msg, c) {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// <-- НОВОЕ: Обработка нажатий на inline-кнопки (callback_query)
+// Когда пользователь нажимает кнопку "kurs:usd_rub" и т.д.
+// ═══════════════════════════════════════════════════════════════
+async function handleCallbackQuery(callbackQuery) {
+    const data = callbackQuery.data || '';
+    const chatId = callbackQuery.message.chat.id;
+    const messageId = callbackQuery.message.message_id;
+    
+    // Убираем "часики" на кнопке
+    try {
+        await telegram('answerCallbackQuery', { callback_query_id: callbackQuery.id });
+    } catch (e) {
+        console.error('answerCallbackQuery error:', e.message);
+    }
+    
+    // Парсим данные кнопки: "kurs:usd_rub" или "crypto:btc"
+    const [type, arg] = data.split(':');
+    
+    let replyText = '';
+    
+    if (type === 'kurs' && PAIRS[arg]) {
+        // Нажата кнопка с парой валют
+        const pair = PAIRS[arg];
+        const rate = await getPairData(pair.from, pair.to);
+        
+        // Отправляем данные модели для генерации ответа в характере Танг
+        const history = await memory.getHistory(chatId);
+        const prompt = `[СВЕЖИЕ ДАННЫЕ РЫНКА (ФИАТ): ${rate}]. ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные, чтобы презрительно назвать фиат "бумажками для лохов", посмеяться над инфляцией или высмеять пользователя за хранение денег в банках. ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент. Говори ломаным русским, используй "мочь" и эмодзи-оружие! Ответ должен быть коротким, 1-3 предложения.`;
+        
+        try {
+            const contents = buildContents(history, [{ text: prompt }]);
+            const { text } = await generateReply(contents, { userLen: 100, deadline: Date.now() + 20000 });
+            replyText = text;
+            await memory.addHistory(chatId, [{ r: 'u', t: `[нажал кнопку: курс ${pair.label}]` }, { r: 'm', t: text }]);
+        } catch (e) {
+            console.error('Market reply generation error:', e.message);
+            replyText = `Курс ${pair.label}: ${rate}. Но мне плевать, колхозан 🥱`;
+        }
+    } else if (type === 'crypto') {
+        // Нажата кнопка с криптой
+        const coins = arg ? arg.split('+') : ['bitcoin', 'ethereum'];
+        const rate = await getCryptoData(coins);
+        
+        const history = await memory.getHistory(chatId);
+        const prompt = `[СВЕЖИЕ ДАННЫЕ РЫНКА (КРИПТА): ${rate}]. ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные, чтобы похвастаться своей "теневой" прибылью, злорадствовать над обвалами или радоваться росту. ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент. Говори ломаным русским, используй "мочь" и эмодзи-оружие! Ответ должен быть коротким, 1-3 предложения.`;
+        
+        try {
+            const contents = buildContents(history, [{ text: prompt }]);
+            const { text } = await generateReply(contents, { userLen: 100, deadline: Date.now() + 20000 });
+            replyText = text;
+            await memory.addHistory(chatId, [{ r: 'u', t: `[нажал кнопку: крипта ${coins.join(',')}]` }, { r: 'm', t: text }]);
+        } catch (e) {
+            console.error('Crypto reply generation error:', e.message);
+            replyText = `Крипта: ${rate}. Мой оффшор плакать от смех 🤗`;
+        }
+    } else {
+        replyText = 'Чщщщщ. Кнопка сломать, колхозан 😌';
+    }
+    
+    // Отправляем ответ в чат
+    try {
+        await sendMessage(chatId, replyText);
+    } catch (e) {
+        console.error('Callback reply send error:', e.message);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// <-- НОВОЕ: Отправка сообщения с inline-кнопками выбора пар
+// ═══════════════════════════════════════════════════════════════
+async function sendKursMenu(chatId) {
+    // Строим клавиатуру из 4 кнопок (2 ряда по 2 кнопки)
+    const pairKeys = Object.keys(PAIRS);
+    const keyboard = [
+        [
+            { text: PAIRS[pairKeys[0]].label, callback_data: `kurs:${pairKeys[0]}` },
+            { text: PAIRS[pairKeys[1]].label, callback_data: `kurs:${pairKeys[1]}` }
+        ],
+        [
+            { text: PAIRS[pairKeys[2]].label, callback_data: `kurs:${pairKeys[2]}` },
+            { text: PAIRS[pairKeys[3]].label, callback_data: `kurs:${pairKeys[3]}` }
+        ]
+    ];
+    
+    const text = 'Ну цто, колхозан, цто ты хотеть знать? Выбирать пара, пока я добрая ☺️';
+    
+    try {
+        await telegram('sendMessage', {
+            chat_id: chatId,
+            text: text,
+            reply_markup: { inline_keyboard: keyboard }
+        });
+    } catch (e) {
+        console.error('sendKursMenu error:', e.message);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// <-- НОВОЕ: Отправка сообщения с inline-кнопками крипты
+// ═══════════════════════════════════════════════════════════════
+async function sendCryptoMenu(chatId) {
+    const keyboard = [
+        [
+            { text: '₿ BTC', callback_data: 'crypto:btc' },
+            { text: 'Ξ ETH', callback_data: 'crypto:eth' }
+        ],
+        [
+            { text: '◎ SOL', callback_data: 'crypto:sol' },
+            { text: '💎 TON', callback_data: 'crypto:ton' }
+        ],
+        [
+            { text: '🔥 ВСЁ СРАЗУ', callback_data: 'crypto:btc+eth+sol+ton' }
+        ]
+    ];
+    
+    const text = 'Ооооцень интересно, какой монета ты хотеть? Выбирать, пока мой голова не устать 🤗';
+    
+    try {
+        await telegram('sendMessage', {
+            chat_id: chatId,
+            text: text,
+            reply_markup: { inline_keyboard: keyboard }
+        });
+    } catch (e) {
+        console.error('sendCryptoMenu error:', e.message);
+    }
+}
+
 module.exports = async (req, res) => {
     // GET: проверка работоспособности
     if (req.method === 'GET') {
@@ -230,19 +309,31 @@ module.exports = async (req, res) => {
     }
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-    // POST: обновления Telegram
     const expected = process.env.TELEGRAM_WEBHOOK_SECRET;
     if (expected && req.headers['x-telegram-bot-api-secret-token'] !== expected) {
         return res.status(401).json({ error: 'Bad webhook secret' });
     }
 
     const update = parseBody(req);
+    
+    // ═══════════════════════════════════════════════════════════════
+    // <-- НОВОЕ: Обработка callback_query (нажатия на inline-кнопки)
+    // Это отдельный тип обновления, не message!
+    // ═══════════════════════════════════════════════════════════════
+    if (update && update.callback_query) {
+        try {
+            await handleCallbackQuery(update.callback_query);
+        } catch (e) {
+            console.error('Callback query error:', e.message);
+        }
+        return res.status(200).json({ status: 'callback_handled' });
+    }
+    
     const msg = update && update.message;
     if (!msg || !msg.chat) return res.status(200).json({ status: 'No message payload' });
     if (await memory.seenUpdate(update.update_id)) return res.status(200).json({ status: 'duplicate' });
 
     const c = cfg();
-    // Страховка: если BOT_USERNAME не задан в ENV, используем 'tangjeebot'
     const botUsername = c.botUsername || process.env.BOT_USERNAME || 'tangjeebot';
 
     if (!shouldAnswer(msg, botUsername)) return res.status(200).json({ status: 'ignored (not addressed)' });
@@ -254,7 +345,6 @@ module.exports = async (req, res) => {
     try {
         telegram('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
 
-        // Вложение и ссылки читаются ПАРАЛЛЕЛЬНО для максимальной скорости (ЦЕЛЬ 1, 3)
         const [incoming, linkInfo] = await Promise.all([
             readIncoming(msg),
             readLinks(msg, c)
@@ -263,95 +353,115 @@ module.exports = async (req, res) => {
         let userText = incoming.userText;
         if (botUsername) userText = userText.replace(new RegExp('@' + botUsername + '\\b', 'gi'), '').trim();
 
+        // ═══════════════════════════════════════════════════════════════
+        // <-- НОВОЕ: Обработка команд /kurs и /crypto БЕЗ аргументов
+        // Если пользователь написал просто /kurs или /crypto - показываем меню с кнопками
+        // ═══════════════════════════════════════════════════════════════
+        const marketCmd = parseMarketCommand(userText);
+        if (marketCmd && !marketCmd.arg) {
+            if (marketCmd.command === 'kurs') {
+                await sendKursMenu(chatId);
+                await memory.touchChat(chatId);
+                return res.status(200).json({ status: 'kurs_menu_sent' });
+            }
+            if (marketCmd.command === 'crypto') {
+                await sendCryptoMenu(chatId);
+                await memory.touchChat(chatId);
+                return res.status(200).json({ status: 'crypto_menu_sent' });
+            }
+        }
+
         if (/^\/start(@\w+)?(\s|$)/.test(userText)) {
             userText = 'Привет! (человек только что запустил бота - поздоровайся в образе)';
         }
 
-        // ЦЕЛЬ 1 и 2Б: Профилирование и чтение цитат
         const replied = msg.reply_to_message;
         const repliedText = replied && (replied.text || replied.caption);
-
-        // Получаем историю ДО формирования контекста, чтобы проверить длину
         const history = await memory.getHistory(chatId);
 
-        // ═══════════════════════════════════════════════════════════════
-        // ИСПРАВЛЕНИЕ СИМПТОМА 1: Профилирование применяется ТОЛЬКО если:
-        // - это первое сообщение в истории (history.length === 0)
-        // - ИЛИ пользователь прямо просит оценить внешность/ник
-        // Это предотвращает зацикливание на аватарке в каждом сообщении.
-        // ═══════════════════════════════════════════════════════════════
         const fullTextLower = (userText + ' ' + (repliedText || '')).toLowerCase();
         const isExplicitProfileRequest = /оцени|внешность|ник|аватарка|как я выгляжу|кто я/.test(fullTextLower);
         const shouldProfile = history.length === 0 || isExplicitProfileRequest;
 
         let contextBlocks = [];
 
-        // ═══════════════════════════════════════════════════════════════
         // <-- НОВОЕ: Инъекция рыночных данных при срабатывании триггера
-        // Команды /kurs и /crypto имеют приоритет над обычными триггерами
-        // ═══════════════════════════════════════════════════════════════
-        const marketCmd = parseMarketCommand(userText);
-        
-        if (marketCmd || checkMarketTrigger(msg)) {
+        // Если команда /kurs или /crypto С аргументом - обрабатываем здесь
+        if (marketCmd && marketCmd.arg) {
             try {
                 let marketData = '';
                 let marketType = '';
                 
-                if (marketCmd) {
-                    // Команда /kurs или /crypto с аргументом
-                    if (marketCmd.command === 'kurs') {
-                        marketData = await getFiatData(marketCmd.arg || 'usd');
+                if (marketCmd.command === 'kurs') {
+                    // Прямой аргумент команды /kurs (например, /kurs usd_rub)
+                    if (PAIRS[marketCmd.arg]) {
+                        const pair = PAIRS[marketCmd.arg];
+                        marketData = await getPairData(pair.from, pair.to);
                         marketType = 'ФИАТ';
-                    } else if (marketCmd.command === 'crypto') {
-                        const coins = marketCmd.arg ? marketCmd.arg.split(/\s+/) : ['bitcoin', 'ethereum'];
-                        marketData = await getCryptoData(coins);
-                        marketType = 'КРИПТА';
-                    }
-                } else {
-                    // Обычный триггер из текста - определяем тип по ключевым словам
-                    const text = userText.toLowerCase();
-                    if (/доллар|евро|рубль|инфляция|цены|фиат/.test(text)) {
-                        marketData = await getFiatData('usd');
-                        marketType = 'ФИАТ';
-                    } else if (/биткоин|btc|eth|крипт/.test(text)) {
-                        marketData = await getCryptoData(['bitcoin', 'ethereum']);
-                        marketType = 'КРИПТА';
                     } else {
-                        // Неизвестный триггер - даём оба
-                        const [fiat, crypto] = await Promise.all([
-                            getFiatData('usd'),
-                            getCryptoData(['bitcoin', 'ethereum'])
-                        ]);
-                        marketData = `ФИАТ: ${fiat} | КРИПТА: ${crypto}`;
-                        marketType = 'ОБЩЕЕ';
+                        marketData = 'Пара не найдена. Доступные: usd_rub, eur_rub, eur_usd, cny_usd';
+                        marketType = 'ОШИБКА';
                     }
+                } else if (marketCmd.command === 'crypto') {
+                    const coins = marketCmd.arg.split(/\s+/);
+                    marketData = await getCryptoData(coins);
+                    marketType = 'КРИПТА';
                 }
                 
                 const instruction = marketType === 'ФИАТ'
-                    ? 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные фиата, чтобы презрительно назвать их "бумажками для лохов", посмеяться над инфляцией или высмеять пользователя за хранение денег в банках. ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент. Говори ломаным русским, используй "мочь"!'
+                    ? 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные фиата, чтобы презрительно назвать их "бумажками для лохов". ЗАПРЕЩЕНО: давать финансовые советы. Говори ломаным русским!'
                     : marketType === 'КРИПТА'
-                    ? 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные крипты, чтобы похвастаться своей "теневой" прибылью, злорадствовать над обвалами или радоваться росту. ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент. Говори ломаным русским, используй "мочь"!'
-                    : 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные, чтобы посмеяться над рынком в целом. ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент. Говори ломаным русским, используй "мочь"!';
+                    ? 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные крипты, чтобы похвастаться своей "теневой" прибылью. ЗАПРЕЩЕНО: давать финансовые советы. Говори ломаным русским!'
+                    : 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Сообщи пользователю об ошибке в своём стиле.';
                 
                 contextBlocks.push(`[СВЕЖИЕ ДАННЫЕ РЫНКА (${marketType}): ${marketData}]. ${instruction}`);
             } catch (e) {
                 console.error('Market data error:', e.message);
-                // Если API недоступен, просто не добавляем данные
+            }
+        } else if (checkMarketTrigger(msg)) {
+            // Обычный триггер из текста
+            try {
+                let marketData = '';
+                let marketType = '';
+                const text = userText.toLowerCase();
+                
+                if (/доллар|евро|рубль|инфляция|цены|фиат/.test(text)) {
+                    marketData = await getPairData('USD', 'RUB');
+                    marketType = 'ФИАТ';
+                } else if (/биткоин|btc|eth|крипт/.test(text)) {
+                    marketData = await getCryptoData(['bitcoin', 'ethereum']);
+                    marketType = 'КРИПТА';
+                } else {
+                    const [fiat, crypto] = await Promise.all([
+                        getPairData('USD', 'RUB'),
+                        getCryptoData(['bitcoin', 'ethereum'])
+                    ]);
+                    marketData = `ФИАТ: ${fiat} | КРИПТА: ${crypto}`;
+                    marketType = 'ОБЩЕЕ';
+                }
+                
+                const instruction = marketType === 'ФИАТ'
+                    ? 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные фиата, чтобы презрительно назвать их "бумажками для лохов". ЗАПРЕЩЕНО: давать финансовые советы. Говори ломаным русским!'
+                    : marketType === 'КРИПТА'
+                    ? 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные крипты, чтобы похвастаться своей "теневой" прибылью. ЗАПРЕЩЕНО: давать финансовые советы. Говори ломаным русским!'
+                    : 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные, чтобы посмеяться над рынком в целом. Говори ломаным русским!';
+                
+                contextBlocks.push(`[СВЕЖИЕ ДАННЫЕ РЫНКА (${marketType}): ${marketData}]. ${instruction}`);
+            } catch (e) {
+                console.error('Market data error:', e.message);
             }
         }
 
-        // Интеллектуальное чтение цитат (ЦЕЛЬ 2Б)
         if (repliedText) {
             const repliedFrom = replied.from;
             const authorName = repliedFrom ? (repliedFrom.first_name || repliedFrom.username || 'Неизвестный') : 'Неизвестный';
-            contextBlocks.push(`[ОН ОТВЕЧАЕТ НА СООБЩЕНИЕ ОТ ${authorName}: "${repliedText.slice(0, 500)}"]. Прокомментируй содержание этого сообщения от лица Танг. Не отвечай автору напрямую, если текущий собеседник не просил об этом. Оцени суть сказанного в цитате. Если в цитате есть триггерные слова (Жак, Ман Го, Лао Рен, родители и т.д.) - реагируй на них.`);
+            contextBlocks.push(`[ОН ОТВЕЧАЕТ НА СООБЩЕНИЕ ОТ ${authorName}: "${repliedText.slice(0, 500)}"]. Прокомментируй содержание этого сообщения от лица Танг.`);
         }
 
-        // Глубокий профилинг (ЦЕЛЬ 1) — ТОЛЬКО при первом контакте или явном запросе
         if (shouldProfile) {
             const userProfile = analyzeUserProfile(msg);
             if (userProfile) {
-                contextBlocks.push(`[ДОСЬЕ ПОЛЬЗОВАТЕЛЯ: ${userProfile}]. Используй эту информацию для персонализированного, язвительного комментария ДО начала основного диалога. В следующих сообщениях НЕ ПОВТОРЯЙ эти детали дословно — максимум вскользь ("твой портрет", "твоя физиономия").`);
+                contextBlocks.push(`[ДОСЬЕ ПОЛЬЗОВАТЕЛЯ: ${userProfile}]. Используй эту информацию для персонализированного, язвительного комментария.`);
             }
         }
 
@@ -363,19 +473,14 @@ module.exports = async (req, res) => {
             spoken ? who + spoken : (isGroup ? `[${displayName(msg.from)}] прислал вложение` : ''),
             incoming.hint,
             incoming.docText,
-            linkInfo.text  // <-- ЗДЕСЬ приходят разобранные ссылки на телеграм-каналы, YouTube, сайты
+            linkInfo.text
         ].filter(Boolean).join('\n');
 
-        // ═══════════════════════════════════════════════════════════════
-        // Аватарка запрашивается и добавляется в mediaParts ТОЛЬКО если shouldProfile === true.
-        // Это на 100% убирает зацикливание, так как модель перестает видеть картинку в каждом сообщении.
-        // ═══════════════════════════════════════════════════════════════
         let userAvatar = null;
         if (shouldProfile && msg.from) {
             userAvatar = await getUserAvatar(msg.from.id);
         }
 
-        // Собираем все медиа: вложения, аватарку (если нужно) и превью из ссылок (ЦЕЛЬ 3)
         const mediaParts = [incoming.media, userAvatar, ...linkInfo.media].filter(Boolean);
         const hasMedia = mediaParts.length > 0;
         const opts = { userLen: userText.length + incoming.docText.length + linkInfo.text.length, hasMedia, deadline };
@@ -386,7 +491,6 @@ module.exports = async (req, res) => {
             reply = (await generateReply(buildContents(history, parts), opts)).text;
         } catch (e) {
             if (!hasMedia || e.status === 401) throw e;
-            // Модель не приняла вложение - второй заход без него, но с честной пометкой
             console.error('Retry without media:', e.message);
             const parts = [{ text: textBlock + '\n[Само вложение или картинка по ссылке обработать не удалось: их содержимое тебе недоступно, не выдумывай его.]' }];
             reply = (await generateReply(buildContents(history, parts), { ...opts, hasMedia: false })).text;
@@ -394,7 +498,6 @@ module.exports = async (req, res) => {
 
         await sendMessage(chatId, reply);
 
-        // Память и расписание пульса (ЦЕЛЬ 4): человек активен, значит следующий «сам по себе» пост - через случайную паузу
         const histUser = [who + spoken, incoming.histNote, linkInfo.note].filter(Boolean).join(' ') || who + '[вложение]';
         const nextPulse = Date.now() + (c.pulseMin + Math.random() * (c.pulseMax - c.pulseMin)) * 60000;
         await Promise.all([
@@ -407,7 +510,6 @@ module.exports = async (req, res) => {
     } catch (error) {
         console.error('Webhook processing error:', error);
         try { await sendMessage(chatId, randomFallback()); } catch (_) { /* ignore */ }
-        // Всегда 200, иначе Telegram будет бесконечно повторять доставку
         return res.status(200).json({ status: 'error_handled', message: error.message });
     }
 };
