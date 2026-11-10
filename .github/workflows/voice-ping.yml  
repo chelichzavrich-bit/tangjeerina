@@ -1,0 +1,16 @@
+name: Voice Ping
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'  # Каждые 2 часа
+  workflow_dispatch:  # Ручной запуск для тестирования
+
+jobs:
+  voice-ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Voice Ping
+        run: |
+          curl -X POST "${{ secrets.PULSE_URL }}" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json"
