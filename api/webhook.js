@@ -8,18 +8,18 @@ const { extractUrls, parseLinks, describeLinks } = require('../lib/links');
 const { generateReply, buildContents } = require('../lib/ai');
 const { randomFallback } = require('../lib/fallbacks');
 const { handlePulseRequest } = require('../lib/pulse');
-const { getCryptoData, getPairData, PAIRS } = require('../lib/market'); // <-- НОВОЕ: рыночные данные
+const { getFiatData, getCryptoData, getPairData, PAIRS } = require('../lib/market'); // <-- НОВОЕ: рыночные данные
 
 // ═══════════════════════════════════════════════════════════════
-// ЖЁСТКИЙ WATCHLIST
+// ЖЁСТКИЙ WATCHLIST (встроен сюда, так как в persona.js нет экспорта TRIGGER_KEYWORDS)
 // ═══════════════════════════════════════════════════════════════
 const WATCHLIST = [
     'tangjeebot', 'танг', 'танджи', 'танг джи рина',
     'жак', 'жрак', 'жак кэрротлин',
-    'лаорен', 'дао рен', 'лао рен', 'лао рен нян',
+    'лаорен', 'лао рен', 'лао рен', 'лао рен нян',
     'манго', 'ман го', 'мандарин',
     'звезда', 'лампа', 'бывший',
-    'харза', 'деньги', 'золото',
+    'харза', 'деньги', 'морковка',
     'лнр', 'лунная народная республика',
     'чингчонг', 'крольчиха',
     'пингвин', 'пингвинья империя',
@@ -47,6 +47,9 @@ function parseBody(req) {
 
 const displayName = (from) => (from && (from.first_name || from.username)) || 'Аноним';
 
+// ═══════════════════════════════════════════════════════════════
+// Извлекает все URL-строки из сообщения для проверки триггеров в ссылках
+// ═══════════════════════════════════════════════════════════════
 function extractRawUrls(msg) {
     const found = [];
     const add = (raw) => {
@@ -173,35 +176,37 @@ async function readLinks(msg, c) {
 
 // ═══════════════════════════════════════════════════════════════
 // <-- НОВОЕ: Обработка нажатий на inline-кнопки (callback_query)
-// Когда пользователь нажимает кнопку "kurs:usd_rub" и т.д.
 // ═══════════════════════════════════════════════════════════════
 async function handleCallbackQuery(callbackQuery) {
     const data = callbackQuery.data || '';
     const chatId = callbackQuery.message.chat.id;
-    const messageId = callbackQuery.message.message_id;
     
-    // Убираем "часики" на кнопке
     try {
         await telegram('answerCallbackQuery', { callback_query_id: callbackQuery.id });
     } catch (e) {
         console.error('answerCallbackQuery error:', e.message);
     }
     
-    // Парсим данные кнопки: "kurs:usd_rub" или "crypto:btc"
     const [type, arg] = data.split(':');
-    
     let replyText = '';
     
     if (type === 'kurs' && PAIRS[arg]) {
-        // Нажата кнопка с парой валют
         const pair = PAIRS[arg];
         const rate = await getPairData(pair.from, pair.to);
         
-        // Отправляем данные модели для генерации ответа в характере Танг
-        const history = await memory.getHistory(chatId);
-        const prompt = `[СВЕЖИЕ ДАННЫЕ РЫНКА (ФИАТ): ${rate}]. ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные, чтобы презрительно назвать фиат "бумажками для лохов", посмеяться над инфляцией или высмеять пользователя за хранение денег в банках. ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент. Говори ломаным русским, используй "мочь" и эмодзи-оружие! Ответ должен быть коротким, 1-3 предложения.`;
+        const jokeAngles = [
+            `Сравни курс ${pair.from}/${pair.to} с длиной веток Жака или тем, сколько мандаринов ты украсть за один звонок.`,
+            `Скажи, что эта сумма меньше, чем ты найти в кармане у лошка, или что твой оффшорный счёт с краденым весит больше.`,
+            `Назови эту валюту фантиком из ЛНР или мусором, который даже бомж не подобрать, и посмейся над тем, кто её держит.`,
+            `Скажи, что разница в курсе или само число меньше, чем IQ собеседника, и предложи ему идти работать за копейки.`,
+            `Обыграй это число через абсурд: например, что за такие деньги можно купить только дырку от бублика в вахтёрской.`
+        ];
+        const randomAngle = jokeAngles[Math.floor(Math.random() * jokeAngles.length)];
+        
+        const prompt = `[СВЕЖИЕ ДАННЫЕ РЫНКА (ФИАТ): ${rate}]. ИНСТРУКЦИЯ ДЛЯ ТАНГ: ${randomAngle} ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент, использовать фразы "мой оффшор плакать" или "твои бумажки обесцениться" (придумай НОВУЮ уникальную шутку). Говори ломаным русским, используй "мочь", пиши числа словами (например: "девяносто два с копейками"). Используй ТОЛЬКО эмодзи: ☺️ 🤗 😋 🤭 🫣. Ответ: 1-3 предложения.`;
         
         try {
+            const history = await memory.getHistory(chatId);
             const contents = buildContents(history, [{ text: prompt }]);
             const { text } = await generateReply(contents, { userLen: 100, deadline: Date.now() + 20000 });
             replyText = text;
@@ -211,27 +216,34 @@ async function handleCallbackQuery(callbackQuery) {
             replyText = `Курс ${pair.label}: ${rate}. Но мне плевать, колхозан 🥱`;
         }
     } else if (type === 'crypto') {
-        // Нажата кнопка с криптой
         const coins = arg ? arg.split('+') : ['bitcoin', 'ethereum'];
         const rate = await getCryptoData(coins);
         
-        const history = await memory.getHistory(chatId);
-        const prompt = `[СВЕЖИЕ ДАННЫЕ РЫНКА (КРИПТА): ${rate}]. ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные, чтобы похвастаться своей "теневой" прибылью, злорадствовать над обвалами или радоваться росту. ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент. Говори ломаным русским, используй "мочь" и эмодзи-оружие! Ответ должен быть коротким, 1-3 предложения.`;
+        const jokeAngles = [
+            `Похвастайся, что твой украденный портфель в плюсе, а этот курс смешон по сравнению с тем, что ты украла.`,
+            `Злорадствуй или радуйся, но обязательно упомяни, что традиционные финансы горят, а ты сидишь в оффшоре.`,
+            `Сравни цену этой монеты с чем-то абсурдным из лора (вактёрская, мандарины, ветки Жака).`,
+            `Назови инвесторов лохами, которые кормят твой будущий ужин своими потерями или прибылью.`,
+            `Скажи, что за такие деньги можно купить только воздух в ЛНР, но ты всё равно богаче.`
+        ];
+        const randomAngle = jokeAngles[Math.floor(Math.random() * jokeAngles.length)];
+        
+        const prompt = `[СВЕЖИЕ ДАННЫЕ РЫНКА (КРИПТА): ${rate}]. ИНСТРУКЦИЯ ДЛЯ ТАНГ: ${randomAngle} ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент, использовать шаблонные фразы. Придумай НОВУЮ уникальную шутку. Говори ломаным русским, используй "мочь", пиши числа словами. Используй ТОЛЬКО эмодзи: ☺️ 🤗 😋 🤭 🫣. Ответ: 1-3 предложения.`;
         
         try {
+            const history = await memory.getHistory(chatId);
             const contents = buildContents(history, [{ text: prompt }]);
             const { text } = await generateReply(contents, { userLen: 100, deadline: Date.now() + 20000 });
             replyText = text;
             await memory.addHistory(chatId, [{ r: 'u', t: `[нажал кнопку: крипта ${coins.join(',')}]` }, { r: 'm', t: text }]);
         } catch (e) {
             console.error('Crypto reply generation error:', e.message);
-            replyText = `Крипта: ${rate}. Мой оффшор плакать от смех 🤗`;
+            replyText = `Крипта: ${rate}. Мой оффшор плакать от смех 🤗`; // Fallback на случай полного краха генерации
         }
     } else {
         replyText = 'Чщщщщ. Кнопка сломать, колхозан 😌';
     }
     
-    // Отправляем ответ в чат
     try {
         await sendMessage(chatId, replyText);
     } catch (e) {
@@ -239,11 +251,7 @@ async function handleCallbackQuery(callbackQuery) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════
-// <-- НОВОЕ: Отправка сообщения с inline-кнопками выбора пар
-// ═══════════════════════════════════════════════════════════════
 async function sendKursMenu(chatId) {
-    // Строим клавиатуру из 4 кнопок (2 ряда по 2 кнопки)
     const pairKeys = Object.keys(PAIRS);
     const keyboard = [
         [
@@ -256,12 +264,10 @@ async function sendKursMenu(chatId) {
         ]
     ];
     
-    const text = 'Ну цто, колхозан, цто ты хотеть знать? Выбирать пара, пока я добрая ☺️';
-    
     try {
         await telegram('sendMessage', {
             chat_id: chatId,
-            text: text,
+            text: 'Ну цто, колхозан, цто ты хотеть знать? Выбирать пара, пока я добрая ☺️',
             reply_markup: { inline_keyboard: keyboard }
         });
     } catch (e) {
@@ -269,9 +275,6 @@ async function sendKursMenu(chatId) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════
-// <-- НОВОЕ: Отправка сообщения с inline-кнопками крипты
-// ═══════════════════════════════════════════════════════════════
 async function sendCryptoMenu(chatId) {
     const keyboard = [
         [
@@ -287,12 +290,10 @@ async function sendCryptoMenu(chatId) {
         ]
     ];
     
-    const text = 'Ооооцень интересно, какой монета ты хотеть? Выбирать, пока мой голова не устать 🤗';
-    
     try {
         await telegram('sendMessage', {
             chat_id: chatId,
-            text: text,
+            text: 'Ооооцень интересно, какой монета ты хотеть? Выбирать, пока мой голова не устать 🤗',
             reply_markup: { inline_keyboard: keyboard }
         });
     } catch (e) {
@@ -300,8 +301,10 @@ async function sendCryptoMenu(chatId) {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// ОСНОВНОЙ ЭКСПОРТ WEBHOOK
+// ═══════════════════════════════════════════════════════════════
 module.exports = async (req, res) => {
-    // GET: проверка работоспособности
     if (req.method === 'GET') {
         const query = req.query || {};
         if (query.cron === 'true') return handlePulseRequest(req, res, { daily: true });
@@ -316,10 +319,7 @@ module.exports = async (req, res) => {
 
     const update = parseBody(req);
     
-    // ═══════════════════════════════════════════════════════════════
-    // <-- НОВОЕ: Обработка callback_query (нажатия на inline-кнопки)
-    // Это отдельный тип обновления, не message!
-    // ═══════════════════════════════════════════════════════════════
+    // Обработка callback_query (нажатия на inline-кнопки)
     if (update && update.callback_query) {
         try {
             await handleCallbackQuery(update.callback_query);
@@ -353,11 +353,9 @@ module.exports = async (req, res) => {
         let userText = incoming.userText;
         if (botUsername) userText = userText.replace(new RegExp('@' + botUsername + '\\b', 'gi'), '').trim();
 
-        // ═══════════════════════════════════════════════════════════════
-        // <-- НОВОЕ: Обработка команд /kurs и /crypto БЕЗ аргументов
-        // Если пользователь написал просто /kurs или /crypto - показываем меню с кнопками
-        // ═══════════════════════════════════════════════════════════════
         const marketCmd = parseMarketCommand(userText);
+        
+        // Если команда без аргументов, показываем меню и завершаем обработку
         if (marketCmd && !marketCmd.arg) {
             if (marketCmd.command === 'kurs') {
                 await sendKursMenu(chatId);
@@ -385,15 +383,13 @@ module.exports = async (req, res) => {
 
         let contextBlocks = [];
 
-        // <-- НОВОЕ: Инъекция рыночных данных при срабатывании триггера
-        // Если команда /kurs или /crypto С аргументом - обрабатываем здесь
+        // <-- НОВОЕ: Инъекция рыночных данных при срабатывании триггера или команды с аргументом
         if (marketCmd && marketCmd.arg) {
             try {
                 let marketData = '';
                 let marketType = '';
                 
                 if (marketCmd.command === 'kurs') {
-                    // Прямой аргумент команды /kurs (например, /kurs usd_rub)
                     if (PAIRS[marketCmd.arg]) {
                         const pair = PAIRS[marketCmd.arg];
                         marketData = await getPairData(pair.from, pair.to);
@@ -409,9 +405,9 @@ module.exports = async (req, res) => {
                 }
                 
                 const instruction = marketType === 'ФИАТ'
-                    ? 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные фиата, чтобы презрительно назвать их "бумажками для лохов". ЗАПРЕЩЕНО: давать финансовые советы. Говори ломаным русским!'
+                    ? 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные фиата, чтобы презрительно назвать их "бумажками для лохов". ЗАПРЕЩЕНО: давать финансовые советы, использовать шаблонные фразы. Придумай новую шутку. Говори ломаным русским, используй "мочь", пиши числа словами. Эмодзи только: ☺️ 🤗 😋 🤭 🫣.'
                     : marketType === 'КРИПТА'
-                    ? 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные крипты, чтобы похвастаться своей "теневой" прибылью. ЗАПРЕЩЕНО: давать финансовые советы. Говори ломаным русским!'
+                    ? 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные крипты, чтобы похвастаться своей "теневой" прибылью. ЗАПРЕЩЕНО: давать финансовые советы, использовать шаблонные фразы. Придумай новую шутку. Говори ломаным русским, используй "мочь", пиши числа словами. Эмодзи только: ☺️ 🤗 😋 🤭 🫣.'
                     : 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Сообщи пользователю об ошибке в своём стиле.';
                 
                 contextBlocks.push(`[СВЕЖИЕ ДАННЫЕ РЫНКА (${marketType}): ${marketData}]. ${instruction}`);
@@ -419,7 +415,6 @@ module.exports = async (req, res) => {
                 console.error('Market data error:', e.message);
             }
         } else if (checkMarketTrigger(msg)) {
-            // Обычный триггер из текста
             try {
                 let marketData = '';
                 let marketType = '';
@@ -440,11 +435,16 @@ module.exports = async (req, res) => {
                     marketType = 'ОБЩЕЕ';
                 }
                 
-                const instruction = marketType === 'ФИАТ'
-                    ? 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные фиата, чтобы презрительно назвать их "бумажками для лохов". ЗАПРЕЩЕНО: давать финансовые советы. Говори ломаным русским!'
-                    : marketType === 'КРИПТА'
-                    ? 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные крипты, чтобы похвастаться своей "теневой" прибылью. ЗАПРЕЩЕНО: давать финансовые советы. Говори ломаным русским!'
-                    : 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные, чтобы посмеяться над рынком в целом. Говори ломаным русским!';
+                const jokeAngles = [
+                    `Сравни эти цифры с длиной веток Жака, его тупостью или тем, сколько мандаринов ты украсть за один звонок.`,
+                    `Скажи, что эта сумма меньше, чем ты найти в кармане у лошка, или что твой оффшорный счёт с краденым весит больше.`,
+                    `Назови эту валюту фантиком из ЛНР или мусором, который даже бомж не подобрать, и посмейся над тем, кто её держит.`,
+                    `Скажи, что разница в курсе или само число меньше, чем IQ собеседника, и предложи ему идти работать за копейки.`,
+                    `Обыграй это число через абсурд: например, что за такие деньги можно купить только дырку от бублика в вахтёрской.`
+                ];
+                const randomAngle = jokeAngles[Math.floor(Math.random() * jokeAngles.length)];
+                
+                const instruction = `ИНСТРУКЦИЯ ДЛЯ ТАНГ: ${randomAngle} ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент, использовать фразы "мой оффшор плакать" или "твои бумажки обесцениться" (придумай НОВУЮ уникальную шутку). Говори ломаным русским, используй "мочь", пиши числа словами (например: "девяносто два с копейками"). Используй ТОЛЬКО эмодзи: ☺️ 🤗 😋 🤭 🫣. Ответ: 1-3 предложения.`;
                 
                 contextBlocks.push(`[СВЕЖИЕ ДАННЫЕ РЫНКА (${marketType}): ${marketData}]. ${instruction}`);
             } catch (e) {
@@ -455,13 +455,13 @@ module.exports = async (req, res) => {
         if (repliedText) {
             const repliedFrom = replied.from;
             const authorName = repliedFrom ? (repliedFrom.first_name || repliedFrom.username || 'Неизвестный') : 'Неизвестный';
-            contextBlocks.push(`[ОН ОТВЕЧАЕТ НА СООБЩЕНИЕ ОТ ${authorName}: "${repliedText.slice(0, 500)}"]. Прокомментируй содержание этого сообщения от лица Танг.`);
+            contextBlocks.push(`[ОН ОТВЕЧАЕТ НА СООБЩЕНИЕ ОТ ${authorName}: "${repliedText.slice(0, 500)}"]. Прокомментируй содержание этого сообщения от лица Танг. Не отвечай автору напрямую, если текущий собеседник не просил об этом. Оцени суть сказанного в цитате.`);
         }
 
         if (shouldProfile) {
             const userProfile = analyzeUserProfile(msg);
             if (userProfile) {
-                contextBlocks.push(`[ДОСЬЕ ПОЛЬЗОВАТЕЛЯ: ${userProfile}]. Используй эту информацию для персонализированного, язвительного комментария.`);
+                contextBlocks.push(`[ДОСЬЕ ПОЛЬЗОВАТЕЛЯ: ${userProfile}]. Используй эту информацию для персонализированного, язвительного комментария ДО начала основного диалога. В следующих сообщениях НЕ ПОВТОРЯЙ эти детали дословно.`);
             }
         }
 
