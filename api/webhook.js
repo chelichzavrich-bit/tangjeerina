@@ -8,7 +8,7 @@ const { extractUrls, parseLinks, describeLinks } = require('../lib/links');
 const { generateReply, buildContents } = require('../lib/ai');
 const { randomFallback } = require('../lib/fallbacks');
 const { handlePulseRequest } = require('../lib/pulse');
-const { getMarketData } = require('../lib/market'); // <-- НОВОЕ: рыночные данные
+const { getFiatData, getCryptoData } = require('../lib/market'); // <-- НОВОЕ: рыночные данные
 
 // ═══════════════════════════════════════════════════════════════
 // ЖЁСТКИЙ WATCHLIST (встроен сюда, так как в persona.js нет экспорта TRIGGER_KEYWORDS, 
@@ -17,7 +17,7 @@ const { getMarketData } = require('../lib/market'); // <-- НОВОЕ: рыно�
 const WATCHLIST = [
     'tangjeebot', 'танг', 'танджи', 'танг джи рина',
     'жак', 'жрак', 'жак кэрротлин',
-    'лаорен', 'дао рен', 'лао рен', 'лао рен нян',
+    'лаорен', 'лао рен', 'лао рен', 'лао рен нян',
     'манго', 'ман го', 'мандарин',
     'звезда', 'лампа', 'бывший',
     'харза', 'деньги', 'золото',
@@ -38,7 +38,7 @@ const MARKET_TRIGGERS = [
     'курс', 'растёт', 'падает', 'ликвидация', 
     'доллар', 'евро', 'рубль', 'инфляция', 'цены', 
     'новости', 'что в мире', 'что случилось', 
-    'kurs', 'crypto', '/курс', '/crypto'
+    'kurs', 'crypto'
 ];
 
 function parseBody(req) {
@@ -96,6 +96,20 @@ function checkTriggers(msg) {
 function checkMarketTrigger(msg) {
     const text = String(msg.text || msg.caption || '').toLowerCase();
     return MARKET_TRIGGERS.some(kw => text.includes(kw));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// <-- НОВОЕ: Парсинг команд /kurs и /crypto с аргументами
+// Примеры: /kurs eur, /crypto btc, /crypto btc eth sol
+// ═══════════════════════════════════════════════════════════════
+function parseMarketCommand(userText) {
+    const match = userText.match(/^\/(kurs|crypto)(?:@\w+)?\s*(.+)?$/i);
+    if (!match) return null;
+    
+    const command = match[1].toLowerCase();
+    const arg = match[2] ? match[2].trim().toLowerCase() : null;
+    
+    return { command, arg };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -274,11 +288,52 @@ module.exports = async (req, res) => {
 
         // ═══════════════════════════════════════════════════════════════
         // <-- НОВОЕ: Инъекция рыночных данных при срабатывании триггера
+        // Команды /kurs и /crypto имеют приоритет над обычными триггерами
         // ═══════════════════════════════════════════════════════════════
-        if (checkMarketTrigger(msg)) {
+        const marketCmd = parseMarketCommand(userText);
+        
+        if (marketCmd || checkMarketTrigger(msg)) {
             try {
-                const marketData = await getMarketData();
-                contextBlocks.push(`[СВЕЖИЕ ДАННЫЕ РЫНКА: ${marketData}]. ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти цифры, чтобы посмеяться над фиатом, похвастаться своей "теневой" прибылью или жестко высмеять пользователя, если он просит совет. ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент, использовать правильную грамматику. Говори ломаным русским, используй "мочь" и эмодзи-оружие!`);
+                let marketData = '';
+                let marketType = '';
+                
+                if (marketCmd) {
+                    // Команда /kurs или /crypto с аргументом
+                    if (marketCmd.command === 'kurs') {
+                        marketData = await getFiatData(marketCmd.arg || 'usd');
+                        marketType = 'ФИАТ';
+                    } else if (marketCmd.command === 'crypto') {
+                        const coins = marketCmd.arg ? marketCmd.arg.split(/\s+/) : ['bitcoin', 'ethereum'];
+                        marketData = await getCryptoData(coins);
+                        marketType = 'КРИПТА';
+                    }
+                } else {
+                    // Обычный триггер из текста - определяем тип по ключевым словам
+                    const text = userText.toLowerCase();
+                    if (/доллар|евро|рубль|инфляция|цены|фиат/.test(text)) {
+                        marketData = await getFiatData('usd');
+                        marketType = 'ФИАТ';
+                    } else if (/биткоин|btc|eth|крипт/.test(text)) {
+                        marketData = await getCryptoData(['bitcoin', 'ethereum']);
+                        marketType = 'КРИПТА';
+                    } else {
+                        // Неизвестный триггер - даём оба
+                        const [fiat, crypto] = await Promise.all([
+                            getFiatData('usd'),
+                            getCryptoData(['bitcoin', 'ethereum'])
+                        ]);
+                        marketData = `ФИАТ: ${fiat} | КРИПТА: ${crypto}`;
+                        marketType = 'ОБЩЕЕ';
+                    }
+                }
+                
+                const instruction = marketType === 'ФИАТ'
+                    ? 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные фиата, чтобы презрительно назвать их "бумажками для лохов", посмеяться над инфляцией или высмеять пользователя за хранение денег в банках. ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент. Говори ломаным русским, используй "мочь"!'
+                    : marketType === 'КРИПТА'
+                    ? 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные крипты, чтобы похвастаться своей "теневой" прибылью, злорадствовать над обвалами или радоваться росту. ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент. Говори ломаным русским, используй "мочь"!'
+                    : 'ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти данные, чтобы посмеяться над рынком в целом. ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент. Говори ломаным русским, используй "мочь"!';
+                
+                contextBlocks.push(`[СВЕЖИЕ ДАННЫЕ РЫНКА (${marketType}): ${marketData}]. ${instruction}`);
             } catch (e) {
                 console.error('Market data error:', e.message);
                 // Если API недоступен, просто не добавляем данные
