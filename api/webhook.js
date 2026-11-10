@@ -9,8 +9,12 @@ const { randomFallback } = require('../lib/fallbacks');
 const { handlePulseRequest } = require('../lib/pulse');
 const { TRIGGER_KEYWORDS } = require('../lib/persona');
 
-// WATCHLIST для Симптомов 2 и 3 (активация без @ и внутри цитат)
-const WATCHLIST_KEYWORDS = ['жак', 'мандарин', 'ман го', 'лао рен', 'звезда', 'лампа', 'бывший', 'харза', 'деньги', 'золото', 'лнр', 'чингчонг', 'крольчиха', 'танджи', 'танг'];
+// WATCHLIST: добавлен tangjeebot (её собственный тег) + все ключевые слова
+const WATCHLIST_KEYWORDS = [
+    'tangjeebot', 'танг', 'жак', 'мандарин', 'ман го', 'манго', 
+    'дао рен', 'даорен', 'лао рен', 'звезда', 'лампа', 'бывший', 
+    'харза', 'деньги', 'золото', 'лнр', 'чингчонг', 'крольчиха', 'танджи'
+];
 
 function parseBody(req) {
     if (typeof req.body === 'string') {
@@ -27,7 +31,10 @@ function checkTriggers(msg) {
     const replyText = (msg.reply_to_message && (msg.reply_to_message.text || msg.reply_to_message.caption) || '').toLowerCase();
     const fullText = text + ' ' + replyText;
     
-    if (TRIGGER_KEYWORDS.some(kw => fullText.includes(kw))) return true;
+    // Проверка TRIGGER_KEYWORDS из persona.js (эмоциональные триггеры)
+    if (TRIGGER_KEYWORDS.some(kw => fullText.includes(kw.toLowerCase()))) return true;
+    
+    // Проверка WATCHLIST_KEYWORDS (имена, теги, ключевые слова)
     if (WATCHLIST_KEYWORDS.some(kw => fullText.includes(kw))) return true;
     
     return false;
@@ -35,22 +42,41 @@ function checkTriggers(msg) {
 
 function shouldAnswer(msg, botUsername) {
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
-    if (!isGroup || !botUsername) return true;
+    
+    // В личных чатах всегда отвечаем
+    if (!isGroup) return true;
     
     const text = (msg.text || msg.caption || '').toLowerCase();
-    if (text.includes('@' + botUsername.toLowerCase())) return true;
+    const replyText = (msg.reply_to_message && (msg.reply_to_message.text || msg.reply_to_message.caption) || '').toLowerCase();
+    const fullText = text + ' ' + replyText;
+    
+    // 1. Прямое @упоминание бота (с учётом разных форматов)
+    if (botUsername) {
+        const botUsernameLower = botUsername.toLowerCase().replace(/^@/, '');
+        // Проверяем @username в тексте
+        if (fullText.includes('@' + botUsernameLower)) return true;
+        // Проверяем, если username упомянут без @ (например, "tangjeebot привет")
+        if (fullText.includes(botUsernameLower)) return true;
+    }
+    
+    // 2. Команды (/start, /help и т.д.)
     if (/^\/\w+/.test(text)) return true;
     
+    // 3. Ответ на сообщение бота
     const repliedFrom = msg.reply_to_message && msg.reply_to_message.from;
-    if (repliedFrom && repliedFrom.is_bot && (repliedFrom.username || '').toLowerCase() === botUsername.toLowerCase()) return true;
+    if (repliedFrom && repliedFrom.is_bot && botUsername) {
+        const repliedUsername = (repliedFrom.username || '').toLowerCase().replace(/^@/, '');
+        if (repliedUsername === botUsername.toLowerCase().replace(/^@/, '')) return true;
+    }
     
-    // Симптом 2 и 3: Активация по watchlist или триггерам, даже без @
+    // 4. КРИТИЧНО: Проверка триггеров и watchlist (активация без @ в групповых чатах)
     if (checkTriggers(msg)) return true;
     
+    // Если ничего не сработало — игнорируем
     return false;
 }
 
-// Роутер приоритетов (Симптом 1 и требование приоритетов)
+// Роутер приоритетов
 function getPriorityDirective(userText, repliedText) {
     const fullText = (userText + ' ' + (repliedText || '')).toLowerCase();
 
@@ -108,7 +134,14 @@ module.exports = async (req, res) => {
     if (await memory.seenUpdate(update.update_id)) return res.status(200).json({ status: 'duplicate' });
 
     const c = cfg();
-    if (!shouldAnswer(msg, c.botUsername)) return res.status(200).json({ status: 'ignored (not addressed)' });
+    
+    // КРИТИЧНО: Убеждаемся, что botUsername установлен корректно
+    const botUsername = c.botUsername || process.env.BOT_USERNAME || 'tangjeebot';
+    
+    if (!shouldAnswer(msg, botUsername)) {
+        console.log(`Ignored message in chat ${msg.chat.id}: not addressed`);
+        return res.status(200).json({ status: 'ignored (not addressed)' });
+    }
 
     const chatId = msg.chat.id;
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
@@ -119,8 +152,12 @@ module.exports = async (req, res) => {
 
         const [incoming, linkInfo] = await Promise.all([readIncoming(msg), readLinks(msg, c)]);
         let userText = incoming.userText;
-        if (c.botUsername) userText = userText.replace(new RegExp('@' + c.botUsername + '\\b', 'gi'), '').trim();
         
+        // Удаляем @упоминания бота из текста
+        if (botUsername) {
+            userText = userText.replace(new RegExp('@' + botUsername + '\\b', 'gi'), '').trim();
+        }
+
         if (/^\/start(@\w+)?(\s|$)/.test(userText)) {
             userText = 'Привет! (человек только что запустил бота - поздоровайся в образе)';
         }
@@ -133,18 +170,17 @@ module.exports = async (req, res) => {
         const priorityDirective = getPriorityDirective(userText, repliedText);
         let contextBlocks = [priorityDirective];
 
-        // 2. Симптом 3: Усиленное чтение цитат (активация уже проверена в shouldAnswer)
+        // 2. Чтение цитат
         if (repliedText) {
             const repliedFrom = replied.from;
             const authorName = repliedFrom ? (repliedFrom.first_name || repliedFrom.username || 'Неизвестный') : 'Неизвестный';
             contextBlocks.push(`[ВАЖНО: Это ответ на цитату от ${authorName}: "${repliedText.slice(0, 400)}"]. Твоя задача: прокомментировать содержание этой цитаты от лица Танг. Если в цитате есть триггерные слова, реагируй на них. Не отвечай автору цитаты напрямую, если текущий собеседник не просил об этом, но оцени суть сказанного в цитате.`);
         }
 
-        // 3. Симптом 1: Профилирование только при первом контакте или явном запросе, и ТОЛЬКО если нет эмоционального триггера
+        // 3. Профилирование только при первом контакте или явном запросе
         const isExplicitProfileRequest = /оцени|внешность|ник|аватарка|как я выгляжу|кто я/.test((userText + ' ' + (repliedText || '')).toLowerCase());
         const noEmotionalTrigger = priorityDirective.includes("ПРИОРИТЕТ 7");
         
-        // Профилирование генерируется один раз при анализе (можно сохранить в meta, но для простоты ограничим history.length === 0 или явным запросом)
         if (noEmotionalTrigger && (history.length === 0 || isExplicitProfileRequest)) {
             const userProfile = analyzeUserProfile(msg);
             if (userProfile) {
@@ -197,7 +233,7 @@ module.exports = async (req, res) => {
     }
 };
 
-// Вспомогательная функция (была в исходнике, сохранена)
+// Вспомогательная функция профилирования
 function analyzeUserProfile(msg) {
     const from = msg.from || {};
     const username = from.username || '';
@@ -220,4 +256,4 @@ function analyzeUserProfile(msg) {
         profileNotes.push(`одно имя "${firstName}" выдает анонимность или игривость`);
     }
     return profileNotes.length > 0 ? profileNotes.join('; ') : 'профиль пользователя не дает интересных зацепок';
-}
+    }
