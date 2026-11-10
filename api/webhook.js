@@ -8,10 +8,11 @@ const { extractUrls, parseLinks, describeLinks } = require('../lib/links');
 const { generateReply, buildContents } = require('../lib/ai');
 const { randomFallback } = require('../lib/fallbacks');
 const { handlePulseRequest } = require('../lib/pulse');
+const { getMarketData } = require('../lib/market'); // <-- НОВОЕ: рыночные данные
 
 // ═══════════════════════════════════════════════════════════════
 // ЖЁСТКИЙ WATCHLIST (встроен сюда, так как в persona.js нет экспорта TRIGGER_KEYWORDS, 
-// что вызывало тихий краш функции checkTriggers и игнорирование сообщений в группах).
+// из-за чего оригинальный checkTriggers падал с ошибкой, и бот молчал в группах).
 // ═══════════════════════════════════════════════════════════════
 const WATCHLIST = [
     'tangjeebot', 'танг', 'танджи', 'танг джи рина',
@@ -29,6 +30,17 @@ const WATCHLIST = [
     'император форстер'
 ];
 
+// ═══════════════════════════════════════════════════════════════
+// <-- НОВОЕ: Триггеры для активации рыночных данных
+// ═══════════════════════════════════════════════════════════════
+const MARKET_TRIGGERS = [
+    'биткоин', 'btc', 'eth', 'эфириум', 'крипта', 'криптовалют', 
+    'курс', 'растёт', 'падает', 'ликвидация', 
+    'доллар', 'евро', 'рубль', 'инфляция', 'цены', 
+    'новости', 'что в мире', 'что случилось', 
+    'kurs', 'crypto', '/курс', '/crypto'
+];
+
 function parseBody(req) {
     if (typeof req.body === 'string') {
         try { return JSON.parse(req.body); } catch (_) { return null; }
@@ -39,21 +51,63 @@ function parseBody(req) {
 const displayName = (from) => (from && (from.first_name || from.username)) || 'Аноним';
 
 // ═══════════════════════════════════════════════════════════════
-// Проверка триггерных слов для принудительной активации (ЦЕЛЬ 2А)
+// Извлекает все URL-строки из сообщения (текст + подписи + скрытые text_link)
+// БЕЗ парсинга содержимого. Нужно, чтобы проверить триггеры в самих ссылках
+// (например, t.me/tangjeebot) ДО чтения ссылок.
+// ═══════════════════════════════════════════════════════════════
+function extractRawUrls(msg) {
+    const found = [];
+    const add = (raw) => {
+        let s = String(raw || '').trim();
+        if (!s) return;
+        if (!found.includes(s.toLowerCase())) found.push(s.toLowerCase());
+    };
+    const text = msg.text || msg.caption || '';
+    const ents = msg.entities || msg.caption_entities || [];
+    for (const e of ents) {
+        if (e.type === 'text_link' && e.url) add(e.url);
+        else if (e.type === 'url') add(text.slice(e.offset, e.offset + e.length));
+    }
+    const re = /\b(?:https?:\/\/|(?:www\.)?(?:t\.me|telegram\.me|youtu\.be|youtube\.com|m\.youtube\.com)[^\s<>"«»]+)/gi;
+    for (const m of text.matchAll(re)) {
+        let s = m[0].replace(/[.,!?;:\]}»"'…]+$/, '');
+        if (s.endsWith(')') && !s.includes('(')) s = s.slice(0, -1);
+        add(s);
+    }
+    return found;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Проверка триггеров: текст сообщения + текст цитаты + URL ссылок в сообщении.
+// Это гарантирует, что бот отреагирует, даже если триггерное слово только в ссылке
+// (например, t.me/zhak_carrotlin или t.me/tangjeebot).
 // ═══════════════════════════════════════════════════════════════
 function checkTriggers(msg) {
     const text = (msg.text || msg.caption || '').toLowerCase();
     const replyText = (msg.reply_to_message && (msg.reply_to_message.text || msg.reply_to_message.caption) || '').toLowerCase();
-    const fullText = text + ' ' + replyText;
+    const urls = extractRawUrls(msg).join(' ');
+    const fullText = text + ' ' + replyText + ' ' + urls;
     return WATCHLIST.some(kw => fullText.includes(kw));
 }
 
 // ═══════════════════════════════════════════════════════════════
-// В группах отвечаем только на упоминание/ответ боту/команду, 
-// ИЛИ если сработал триггер из WATCHLIST.
+// <-- НОВОЕ: Проверка рыночных триггеров
+// ═══════════════════════════════════════════════════════════════
+function checkMarketTrigger(msg) {
+    const text = String(msg.text || msg.caption || '').toLowerCase();
+    return MARKET_TRIGGERS.some(kw => text.includes(kw));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// В группах отвечаем, если:
+// 1. Упомянули @botUsername (или просто botUsername в тексте как отдельное слово)
+// 2. Ответ на сообщение самого бота
+// 3. Команда (/start и т.д.)
+// 4. Сработал триггер из WATCHLIST (в тексте, цитате ИЛИ в URL ссылок)
 // ═══════════════════════════════════════════════════════════════
 function shouldAnswer(msg, botUsername) {
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
+    // В личных чатах всегда отвечаем; если botUsername не задан — тоже отвечаем (страховка)
     if (!isGroup || !botUsername) return true;
 
     const targetUsername = botUsername.toLowerCase().replace(/^@/, '');
@@ -61,7 +115,7 @@ function shouldAnswer(msg, botUsername) {
     const replyText = (msg.reply_to_message && (msg.reply_to_message.text || msg.reply_to_message.caption) || '').toLowerCase();
     const fullText = text + ' ' + replyText;
 
-    // 1. Прямое упоминание через @
+    // 1. Прямое упоминание бота через @
     if (fullText.includes('@' + targetUsername)) return true;
 
     // 2. Username как отдельное слово (чтобы "tangjeebot" сработало, но "mytangjeebot" — нет)
@@ -78,7 +132,7 @@ function shouldAnswer(msg, botUsername) {
         if (repliedUsername === targetUsername) return true;
     }
 
-    // 5. ЦЕЛЬ 2А: Система триггеров (принудительная активация в группах)
+    // 5. ТРИГГЕРЫ (в тексте + цитате + URL ссылок) — ключевое исправление для групп
     if (checkTriggers(msg)) return true;
 
     return false;
@@ -125,7 +179,7 @@ async function getUserAvatar(userId) {
                 const imgRes = await fetch(`https://api.telegram.org/file/bot${token}/${file.result.file_path}`);
                 if (imgRes.ok) {
                     const buf = Buffer.from(await imgRes.arrayBuffer());
-                    const mime = photo.file_size > 100000 ? 'image/jpeg' : 'image/jpeg';
+                    const mime = 'image/jpeg';
                     return { inline_data: { mime_type: mime, data: buf.toString('base64') } };
                 }
             }
@@ -186,27 +240,31 @@ module.exports = async (req, res) => {
     try {
         telegram('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
 
-        // Вложение и ссылки читаются параллельно для максимальной скорости
+        // Вложение и ссылки читаются ПАРАЛЛЕЛЬНО для максимальной скорости (ЦЕЛЬ 1, 3)
         const [incoming, linkInfo] = await Promise.all([
             readIncoming(msg),
             readLinks(msg, c)
         ]);
 
         let userText = incoming.userText;
-        if (c.botUsername) userText = userText.replace(new RegExp('@' + c.botUsername + '\\b', 'gi'), '').trim();
+        if (botUsername) userText = userText.replace(new RegExp('@' + botUsername + '\\b', 'gi'), '').trim();
 
         if (/^\/start(@\w+)?(\s|$)/.test(userText)) {
             userText = 'Привет! (человек только что запустил бота - поздоровайся в образе)';
         }
 
-        const history = await memory.getHistory(chatId);
+        // ЦЕЛЬ 1 и 2Б: Профилирование и чтение цитат
         const replied = msg.reply_to_message;
         const repliedText = replied && (replied.text || replied.caption);
 
+        // Получаем историю ДО формирования контекста, чтобы проверить длину
+        const history = await memory.getHistory(chatId);
+
         // ═══════════════════════════════════════════════════════════════
-        // ИСПРАВЛЕНИЕ СИМПТОМА 1: Профилирование и аватарка применяются 
-        // ТОЛЬКО если это первое сообщение в истории ИЛИ прямой запрос.
-        // Это предотвращает зацикливание на описании внешности.
+        // ИСПРАВЛЕНИЕ СИМПТОМА 1: Профилирование применяется ТОЛЬКО если:
+        // - это первое сообщение в истории (history.length === 0)
+        // - ИЛИ пользователь прямо просит оценить внешность/ник
+        // Это предотвращает зацикливание на аватарке в каждом сообщении.
         // ═══════════════════════════════════════════════════════════════
         const fullTextLower = (userText + ' ' + (repliedText || '')).toLowerCase();
         const isExplicitProfileRequest = /оцени|внешность|ник|аватарка|как я выгляжу|кто я/.test(fullTextLower);
@@ -214,18 +272,31 @@ module.exports = async (req, res) => {
 
         let contextBlocks = [];
 
+        // ═══════════════════════════════════════════════════════════════
+        // <-- НОВОЕ: Инъекция рыночных данных при срабатывании триггера
+        // ═══════════════════════════════════════════════════════════════
+        if (checkMarketTrigger(msg)) {
+            try {
+                const marketData = await getMarketData();
+                contextBlocks.push(`[СВЕЖИЕ ДАННЫЕ РЫНКА: ${marketData}]. ИНСТРУКЦИЯ ДЛЯ ТАНГ: Используй эти цифры, чтобы посмеяться над фиатом, похвастаться своей "теневой" прибылью или жестко высмеять пользователя, если он просит совет. ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент, использовать правильную грамматику. Говори ломаным русским, используй "мочь" и эмодзи-оружие!`);
+            } catch (e) {
+                console.error('Market data error:', e.message);
+                // Если API недоступен, просто не добавляем данные
+            }
+        }
+
         // Интеллектуальное чтение цитат (ЦЕЛЬ 2Б)
         if (repliedText) {
             const repliedFrom = replied.from;
             const authorName = repliedFrom ? (repliedFrom.first_name || repliedFrom.username || 'Неизвестный') : 'Неизвестный';
-            contextBlocks.push(`[ОН ОТВЕЧАЕТ НА СООБЩЕНИЕ ОТ ${authorName}: "${repliedText.slice(0, 500)}"]. Прокомментируй содержание этого сообщения от лица Танг. Не отвечай автору напрямую, если текущий собеседник не просил об этом. Оцени суть сказанного в цитате. Если в цитате есть триггерные слова - реагируй на них.`);
+            contextBlocks.push(`[ОН ОТВЕЧАЕТ НА СООБЩЕНИЕ ОТ ${authorName}: "${repliedText.slice(0, 500)}"]. Прокомментируй содержание этого сообщения от лица Танг. Не отвечай автору напрямую, если текущий собеседник не просил об этом. Оцени суть сказанного в цитате. Если в цитате есть триггерные слова (Жак, Ман Го, Лао Рен, родители и т.д.) - реагируй на них.`);
         }
 
         // Глубокий профилинг (ЦЕЛЬ 1) — ТОЛЬКО при первом контакте или явном запросе
         if (shouldProfile) {
             const userProfile = analyzeUserProfile(msg);
             if (userProfile) {
-                contextBlocks.push(`[ДОСЬЕ ПОЛЬЗОВАТЕЛЯ: ${userProfile}]. Используй эту информацию для персонализированного, язвительного комментария ДО начала основного диалога. В следующих сообщениях НЕ ПОВТОРЯЙ эти детали дословно.`);
+                contextBlocks.push(`[ДОСЬЕ ПОЛЬЗОВАТЕЛЯ: ${userProfile}]. Используй эту информацию для персонализированного, язвительного комментария ДО начала основного диалога. В следующих сообщениях НЕ ПОВТОРЯЙ эти детали дословно — максимум вскользь ("твой портрет", "твоя физиономия").`);
             }
         }
 
@@ -237,7 +308,7 @@ module.exports = async (req, res) => {
             spoken ? who + spoken : (isGroup ? `[${displayName(msg.from)}] прислал вложение` : ''),
             incoming.hint,
             incoming.docText,
-            linkInfo.text
+            linkInfo.text  // <-- ЗДЕСЬ приходят разобранные ссылки на телеграм-каналы, YouTube, сайты
         ].filter(Boolean).join('\n');
 
         // ═══════════════════════════════════════════════════════════════
