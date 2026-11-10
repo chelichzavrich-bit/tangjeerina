@@ -1,5 +1,4 @@
 // Telegram webhook: Танг Джи Рина (Vercel + Google Gemini).
-// Логика разложена по модулям в папке lib/. Текст персонажа лежит в lib/persona.js.
 const { cfg } = require('../lib/config');
 const memory = require('../lib/memory');
 const { telegram, sendMessage } = require('../lib/telegram');
@@ -10,6 +9,9 @@ const { randomFallback } = require('../lib/fallbacks');
 const { handlePulseRequest } = require('../lib/pulse');
 const { TRIGGER_KEYWORDS } = require('../lib/persona');
 
+// WATCHLIST для Симптомов 2 и 3 (активация без @ и внутри цитат)
+const WATCHLIST_KEYWORDS = ['жак', 'мандарин', 'ман го', 'лао рен', 'звезда', 'лампа', 'бывший', 'харза', 'деньги', 'золото', 'лнр', 'чингчонг', 'крольчиха', 'танджи', 'танг'];
+
 function parseBody(req) {
     if (typeof req.body === 'string') {
         try { return JSON.parse(req.body); } catch (_) { return null; }
@@ -19,15 +21,18 @@ function parseBody(req) {
 
 const displayName = (from) => (from && (from.first_name || from.username)) || 'Аноним';
 
-// Проверка триггерных слов для принудительной активации (ЦЕЛЬ 2А)
+// Проверка триггеров И watchlist (включая текст цитаты)
 function checkTriggers(msg) {
     const text = (msg.text || msg.caption || '').toLowerCase();
     const replyText = (msg.reply_to_message && (msg.reply_to_message.text || msg.reply_to_message.caption) || '').toLowerCase();
     const fullText = text + ' ' + replyText;
-    return TRIGGER_KEYWORDS.some(kw => fullText.includes(kw));
+    
+    if (TRIGGER_KEYWORDS.some(kw => fullText.includes(kw))) return true;
+    if (WATCHLIST_KEYWORDS.some(kw => fullText.includes(kw))) return true;
+    
+    return false;
 }
 
-// В группах отвечаем только на упоминание/ответ боту/команду, если задан BOT_USERNAME, ИЛИ если сработал триггер.
 function shouldAnswer(msg, botUsername) {
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
     if (!isGroup || !botUsername) return true;
@@ -39,65 +44,37 @@ function shouldAnswer(msg, botUsername) {
     const repliedFrom = msg.reply_to_message && msg.reply_to_message.from;
     if (repliedFrom && repliedFrom.is_bot && (repliedFrom.username || '').toLowerCase() === botUsername.toLowerCase()) return true;
     
-    // ЦЕЛЬ 2А: Система триггеров (принудительная активация)
+    // Симптом 2 и 3: Активация по watchlist или триггерам, даже без @
     if (checkTriggers(msg)) return true;
     
     return false;
 }
 
-// ЦЕЛЬ 1: Глубокий профилинг собеседника (метаданные)
-function analyzeUserProfile(msg) {
-    const from = msg.from || {};
-    const username = from.username || '';
-    const firstName = from.first_name || '';
-    const lastName = from.last_name || '';
-    
-    let profileNotes = [];
-    
-    if (username) {
-        if (/\d{3,}|[_-]{2,}|666|dark|lord|edgy/i.test(username)) {
-            profileNotes.push(`юзернейм @${username} кричит о попытках быть крутым или мрачным`);
-        } else if (/sunny|kitten|cute|baby/i.test(username)) {
-            profileNotes.push(`юзернейм @${username} слишком слащавый и подозрительный`);
-        } else {
-            profileNotes.push(`юзернейм @${username} стандартный и скучный`);
-        }
-    }
-    
-    if (firstName && lastName) {
-        profileNotes.push(`полное имя "${firstName} ${lastName}" выдает серьезность или попытку казаться взрослым`);
-    } else if (firstName && !lastName) {
-        profileNotes.push(`одно имя "${firstName}" выдает анонимность или игривость`);
-    }
+// Роутер приоритетов (Симптом 1 и требование приоритетов)
+function getPriorityDirective(userText, repliedText) {
+    const fullText = (userText + ' ' + (repliedText || '')).toLowerCase();
 
-    return profileNotes.length > 0 ? profileNotes.join('; ') : 'профиль пользователя не дает интересных зацепок';
+    if (/ман го|тебя бросили|ты не сама научилась|бросил/.test(fullText)) {
+        return "[ПРИОРИТЕТ 1: Сжатие, тишина, отрицание имени, без капса, без истерики. Профилирование молчит.]";
+    }
+    if (/любишь жака|чувства к жаку|нравишься жак|симпатия|неравнодушна/.test(fullText)) {
+        return "[ПРИОРИТЕТ 2: Смена темы + абсурд, без капса, без истерики, подтекст не озвучивать. Профилирование молчит.]";
+    }
+    if (/дракон|лао рен|лнр-пропаганда|лунная народная республика/.test(fullText)) {
+        return "[ПРИОРИТЕТ 3: Капс, паника, китайский, агрессия.]";
+    }
+    if (/ли чуцао|сестра|умершая сестра/.test(fullText)) {
+        return "[ПРИОРИТЕТ 4: Капс, слёзы ярости, отрицание боли.]";
+    }
+    if (/родители|ли мун|скучают|отец|танг ченг/.test(fullText)) {
+        return "[ПРИОРИТЕТ 5: Капс, газлайтинг, требование кошелька.]";
+    }
+    if (/кобыла|шлюха|урод|глупая|толстая|дебил|колхозан/.test(fullText)) {
+        return "[ПРИОРИТЕТ 6: Cold Troll, зеркальное унижение, без капса, лениво, 1-4 предложения.]";
+    }
+    return "[ПРИОРИТЕТ 7: Обычный режим. Профилирование применять только если это первое сообщение или пользователь прямо просит оценить внешность/ник. Не повторять детали профиля из прошлых сообщений.]";
 }
 
-// Получение аватарки пользователя для Gemini Vision (ЦЕЛЬ 1)
-async function getUserAvatar(userId) {
-    try {
-        const res = await telegram('getUserProfilePhotos', { user_id: userId, limit: 1 });
-        if (res.result && res.result.total_count > 0) {
-            const photo = res.result.photos[0].pop(); // highest resolution
-            const file = await telegram('getFile', { file_id: photo.file_id });
-            if (file.result && file.result.file_path) {
-                const token = process.env.TELEGRAM_BOT_TOKEN;
-                const imgRes = await fetch(`https://api.telegram.org/file/bot${token}/${file.result.file_path}`);
-                if (imgRes.ok) {
-                    const buf = Buffer.from(await imgRes.arrayBuffer());
-                    // Telegram profile photos are typically JPEG, but we can be safe
-                    const mime = photo.file_size > 100000 ? 'image/jpeg' : 'image/jpeg'; 
-                    return { inline_data: { mime_type: mime, data: buf.toString('base64') } };
-                }
-            }
-        }
-    } catch (e) {
-        // Игнорируем ошибки получения аватарки, чтобы не ломать основной поток
-    }
-    return null;
-}
-
-// Читает ссылки из сообщения. Любая ошибка здесь не должна ломать ответ.
 async function readLinks(msg, c) {
     const empty = { text: '', media: [], note: '' };
     if (!c.linksEnabled) return empty;
@@ -113,7 +90,6 @@ async function readLinks(msg, c) {
 }
 
 module.exports = async (req, res) => {
-    // ── GET: проверка работоспособности ──
     if (req.method === 'GET') {
         const query = req.query || {};
         if (query.cron === 'true') return handlePulseRequest(req, res, { daily: true });
@@ -121,7 +97,6 @@ module.exports = async (req, res) => {
     }
     if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-    // ── POST: обновления Telegram ──
     const expected = process.env.TELEGRAM_WEBHOOK_SECRET;
     if (expected && req.headers['x-telegram-bot-api-secret-token'] !== expected) {
         return res.status(401).json({ error: 'Bad webhook secret' });
@@ -142,34 +117,39 @@ module.exports = async (req, res) => {
     try {
         telegram('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
 
-        // Вложение, ссылки и аватарка читаются параллельно для максимальной скорости (ЦЕЛЬ 1, 3)
-        const [incoming, linkInfo, userAvatar] = await Promise.all([
-            readIncoming(msg), 
-            readLinks(msg, c),
-            msg.from ? getUserAvatar(msg.from.id) : Promise.resolve(null)
-        ]);
-
+        const [incoming, linkInfo] = await Promise.all([readIncoming(msg), readLinks(msg, c)]);
         let userText = incoming.userText;
         if (c.botUsername) userText = userText.replace(new RegExp('@' + c.botUsername + '\\b', 'gi'), '').trim();
+        
         if (/^\/start(@\w+)?(\s|$)/.test(userText)) {
             userText = 'Привет! (человек только что запустил бота - поздоровайся в образе)';
         }
 
-        // ЦЕЛЬ 1 и 2Б: Профилирование и чтение цитат
-        const userProfile = analyzeUserProfile(msg);
+        const history = await memory.getHistory(chatId);
         const replied = msg.reply_to_message;
         const repliedText = replied && (replied.text || replied.caption);
-        
-        let contextBlocks = [];
-        
-        // Интеллектуальное чтение цитат (ЦЕЛЬ 2Б)
+
+        // 1. Применяем Роутер Приоритетов
+        const priorityDirective = getPriorityDirective(userText, repliedText);
+        let contextBlocks = [priorityDirective];
+
+        // 2. Симптом 3: Усиленное чтение цитат (активация уже проверена в shouldAnswer)
         if (repliedText) {
-            contextBlocks.push(`[ОН ОТВЕЧАЕТ НА СООБЩЕНИЕ: "${repliedText.slice(0, 500)}"]. Прокомментируй содержание этого сообщения от лица Танг. Не отвечай автору напрямую, если он не обратился к ней. Оцени суть сказанного.`);
+            const repliedFrom = replied.from;
+            const authorName = repliedFrom ? (repliedFrom.first_name || repliedFrom.username || 'Неизвестный') : 'Неизвестный';
+            contextBlocks.push(`[ВАЖНО: Это ответ на цитату от ${authorName}: "${repliedText.slice(0, 400)}"]. Твоя задача: прокомментировать содержание этой цитаты от лица Танг. Если в цитате есть триггерные слова, реагируй на них. Не отвечай автору цитаты напрямую, если текущий собеседник не просил об этом, но оцени суть сказанного в цитате.`);
         }
+
+        // 3. Симптом 1: Профилирование только при первом контакте или явном запросе, и ТОЛЬКО если нет эмоционального триггера
+        const isExplicitProfileRequest = /оцени|внешность|ник|аватарка|как я выгляжу|кто я/.test((userText + ' ' + (repliedText || '')).toLowerCase());
+        const noEmotionalTrigger = priorityDirective.includes("ПРИОРИТЕТ 7");
         
-        // Глубокий профилинг (ЦЕЛЬ 1)
-        if (userProfile) {
-            contextBlocks.push(`[ДОСЬЕ ПОЛЬЗОВАТЕЛЯ: ${userProfile}]. Используй эту информацию для персонализированного, язвительного комментария ДО начала основного диалога.`);
+        // Профилирование генерируется один раз при анализе (можно сохранить в meta, но для простоты ограничим history.length === 0 или явным запросом)
+        if (noEmotionalTrigger && (history.length === 0 || isExplicitProfileRequest)) {
+            const userProfile = analyzeUserProfile(msg);
+            if (userProfile) {
+                contextBlocks.push(`[ДОСЬЕ ПОЛЬЗОВАТЕЛЯ (ИСПОЛЬЗОВАТЬ ВСКОЛЬЗЬ, НЕ ЦИТИРОВАТЬ ДОСЛОВНО В БУДУЩЕМ): ${userProfile}]`);
+            }
         }
 
         const who = isGroup ? `[${displayName(msg.from)}]: ` : '';
@@ -183,9 +163,7 @@ module.exports = async (req, res) => {
             linkInfo.text
         ].filter(Boolean).join('\n');
 
-        const history = await memory.getHistory(chatId);
-        // Собираем все медиа: вложения, аватарку и превью из ссылок (ЦЕЛЬ 3)
-        const mediaParts = [incoming.media, userAvatar, ...linkInfo.media].filter(Boolean);
+        const mediaParts = [incoming.media, ...linkInfo.media].filter(Boolean);
         const hasMedia = mediaParts.length > 0;
         const opts = { userLen: userText.length + incoming.docText.length + linkInfo.text.length, hasMedia, deadline };
 
@@ -195,7 +173,6 @@ module.exports = async (req, res) => {
             reply = (await generateReply(buildContents(history, parts), opts)).text;
         } catch (e) {
             if (!hasMedia || e.status === 401) throw e;
-            // Модель не приняла вложение - второй заход без него, но с честной пометкой
             console.error('Retry without media:', e.message);
             const parts = [{ text: textBlock + '\n[Само вложение или картинка по ссылке обработать не удалось: их содержимое тебе недоступно, не выдумывай его.]' }];
             reply = (await generateReply(buildContents(history, parts), { ...opts, hasMedia: false })).text;
@@ -203,7 +180,6 @@ module.exports = async (req, res) => {
 
         await sendMessage(chatId, reply);
 
-        // Память и расписание пульса (ЦЕЛЬ 4): человек активен, значит следующий «сам по себе» пост - через случайную паузу
         const histUser = [who + spoken, incoming.histNote, linkInfo.note].filter(Boolean).join(' ') || who + '[вложение]';
         const nextPulse = Date.now() + (c.pulseMin + Math.random() * (c.pulseMax - c.pulseMin)) * 60000;
         
@@ -217,7 +193,31 @@ module.exports = async (req, res) => {
     } catch (error) {
         console.error('Webhook processing error:', error);
         try { await sendMessage(chatId, randomFallback()); } catch (_) { /* ignore */ }
-        // Всегда 200, иначе Telegram будет бесконечно повторять доставку
         return res.status(200).json({ status: 'error_handled', message: error.message });
     }
 };
+
+// Вспомогательная функция (была в исходнике, сохранена)
+function analyzeUserProfile(msg) {
+    const from = msg.from || {};
+    const username = from.username || '';
+    const firstName = from.first_name || '';
+    const lastName = from.last_name || '';
+    let profileNotes = [];
+    
+    if (username) {
+        if (/\d{3,}\|[_-]{2,}\|666\|dark\|lord\|edgy/i.test(username)) {
+            profileNotes.push(`юзернейм @${username} кричит о попытках быть крутым или мрачным`);
+        } else if (/sunny\|kitten\|cute\|baby/i.test(username)) {
+            profileNotes.push(`юзернейм @${username} слишком слащавый и подозрительный`);
+        } else {
+            profileNotes.push(`юзернейм @${username} стандартный и скучный`);
+        }
+    }
+    if (firstName && lastName) {
+        profileNotes.push(`полное имя "${firstName} ${lastName}" выдает серьезность или попытку казаться взрослым`);
+    } else if (firstName && !lastName) {
+        profileNotes.push(`одно имя "${firstName}" выдает анонимность или игривость`);
+    }
+    return profileNotes.length > 0 ? profileNotes.join('; ') : 'профиль пользователя не дает интересных зацепок';
+}
