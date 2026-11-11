@@ -54,14 +54,14 @@ function getTangTimeContext() {
     const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
     const tangTime = new Date(utc + (3600000 * -5)); // UTC-5
     const hours = tangTime.getHours();
-    
+
     let period = '';
     if (hours >= 5 && hours < 12) period = 'утро (она бодра, голодна и готова грабить)';
     else if (hours >= 12 && hours < 18) period = 'день (она активна, ищет лохов в интернете)';
     else if (hours >= 18 && hours < 23) period = 'вечер (пик активности, время троллинга и абсурда)';
     else period = 'ночь (она хочет спать, злая, или делает вид, что спит, чтобы её не трогали. Это её оправдание, чтобы идти спать или огрызаться)';
-    
-    return `[КОНТЕКСТ ВРЕМЕНИ: Сейчас у Танг часовой пояс UTC-5, на часах ${hours}:00. Сейчас у неё ${period}. Используй это как контекст или оправдание в ответе.]`;
+
+    return `[КОНТЕКСТ ВРЕМЕНИ: Сейчас у Танг часовой пояс UTC-5, на часах ${hours}:00. Сейчас у неё ${period}. Учитывай это как своё внутреннее состояние, но НЕ сообщай время и НЕ упоминай его в ответе, если собеседник прямо не спросил про время, сон, утро или вечер.]`;
 }
 
 function extractRawUrls(msg) {
@@ -107,14 +107,31 @@ function parseMarketCommand(userText) {
     return { command, arg };
 }
 
+// ═══════════════════════════════════════════════════════════════
+// ВОССТАНОВЛЕНО: полная проверка адресованности, включая WATCHLIST-триггеры
+// ═══════════════════════════════════════════════════════════════
 function shouldAnswer(msg, botUsername) {
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
     if (!isGroup || !botUsername) return true;
+
+    const targetUsername = botUsername.toLowerCase().replace(/^@/, '');
     const text = (msg.text || msg.caption || '').toLowerCase();
-    if (text.includes('@' + botUsername.toLowerCase())) return true;
+    const replyText = (msg.reply_to_message && (msg.reply_to_message.text || msg.reply_to_message.caption) || '').toLowerCase();
+    const fullText = text + ' ' + replyText;
+
+    if (fullText.includes('@' + targetUsername)) return true;
+    const usernameRe = new RegExp('(^|[^a-z0-9_])' + targetUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '([^a-z0-9_]|$)');
+    if (usernameRe.test(fullText)) return true;
     if (/^\/\w+/.test(text)) return true;
+
     const repliedFrom = msg.reply_to_message && msg.reply_to_message.from;
-    return !!(repliedFrom && repliedFrom.is_bot && (repliedFrom.username || '').toLowerCase() === botUsername.toLowerCase());
+    if (repliedFrom && repliedFrom.is_bot) {
+        const repliedUsername = (repliedFrom.username || '').toLowerCase().replace(/^@/, '');
+        if (repliedUsername === targetUsername) return true;
+    }
+
+    if (checkTriggers(msg)) return true;
+    return false;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -126,7 +143,7 @@ function shouldSpontaneouslyAnswer(msg, botUsername) {
     if (shouldAnswer(msg, botUsername)) return false; // Не дублировать, если уже адресовано
 
     const text = (msg.text || msg.caption || '').toLowerCase();
-    
+
     const interestingTopics = [
         'жак', 'снеговик', 'морковка', 'мандарин', 'воровство', 'кража', 'исчезновение',
         'крипта', 'биткоин', 'деньги', 'бабло', 'оффшор',
@@ -204,20 +221,20 @@ async function readLinks(msg, c) {
 async function handleCallbackQuery(callbackQuery) {
     const data = callbackQuery.data || '';
     const chatId = callbackQuery.message.chat.id;
-    
+
     try {
         await telegram('answerCallbackQuery', { callback_query_id: callbackQuery.id });
     } catch (e) {
         console.error('answerCallbackQuery error:', e.message);
     }
-    
+
     const [type, arg] = data.split(':');
     let replyText = '';
-    
+
     if (type === 'kurs' && PAIRS[arg]) {
         const pair = PAIRS[arg];
         const rate = await getPairData(pair.from, pair.to);
-        
+
         const jokeAngles = [
             `Сравни курс ${pair.from}/${pair.to} с "длина см Жака, когда он рад меня видеть" или тем, сколько мандаринов ты украсть за один звонок.`,
             `Скажи, что эта сумма меньше, "чем твой шансы вылазить из мамкин подвала, поздравляю", или что твой оффшорный счёт с краденым весит больше.`,
@@ -226,9 +243,9 @@ async function handleCallbackQuery(callbackQuery) {
             `Обыграй это число через абсурд: например, что за такие деньги можно купить только дырку от бублика в вахтёрской.`
         ];
         const randomAngle = jokeAngles[Math.floor(Math.random() * jokeAngles.length)];
-        
+
         const prompt = `[СВЕЖИЕ ДАННЫЕ РЫНКА (ФИАТ): ${rate}]. ИНСТРУКЦИЯ ДЛЯ ТАНГ: ${randomAngle} ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент, использовать фразы "мой оффшор плакать" или "твои бумажки обесцениться" или "чудесно что мне есть поевать" (придумай НОВУЮ уникальную шутку). Говори ломаным русским, используй "мочь", "имею", "победю", пиши числа искаженными словами (например: "девяноса два и копейками"). Используй ТОЛЬКО эмодзи: ☺️ 🤗 😋 🤭 🫣. Ответ: 1-3 предложения.`;
-        
+
         try {
             const history = await memory.getHistory(chatId);
             const contents = buildContents(history, [{ text: prompt }]);
@@ -242,7 +259,7 @@ async function handleCallbackQuery(callbackQuery) {
     } else if (type === 'crypto') {
         const coins = arg ? arg.split('+') : ['bitcoin', 'ethereum'];
         const rate = await getCryptoData(coins);
-        
+
         const jokeAngles = [
             `Похвастайся, что твой украденный портфель в плюсе, а этот курс смешон по сравнению с тем, что ты украла.`,
             `Злорадствуй или радуйся, но обязательно упомяни, что традиционные финансы горят, а ты сидишь в оффшоре.`,
@@ -251,9 +268,9 @@ async function handleCallbackQuery(callbackQuery) {
             `Скажи, что за такие деньги можно купить только воздух в ЛНР, но ты всё равно богаче.`
         ];
         const randomAngle = jokeAngles[Math.floor(Math.random() * jokeAngles.length)];
-        
+
         const prompt = `[СВЕЖИЕ ДАННЫЕ РЫНКА (КРИПТА): ${rate}]. ИНСТРУКЦИЯ ДЛЯ ТАНГ: ${randomAngle} ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент, использовать шаблонные фразы типа "оффшор плакать". Придумай НОВУЮ уникальную шутку. Говори ломаным русским, используй "мочь", пиши числа словами. Используй ТОЛЬКО эмодзи: ☺️ 🤗 😋 🤭 🫣. Ответ: 1-3 предложения.`;
-        
+
         try {
             const history = await memory.getHistory(chatId);
             const contents = buildContents(history, [{ text: prompt }]);
@@ -267,7 +284,7 @@ async function handleCallbackQuery(callbackQuery) {
     } else {
         replyText = 'Чщщщщ. харе лупатасить, отбитовый, не видь, что не рабочий😠';
     }
-    
+
     try {
         await sendMessage(chatId, replyText);
     } catch (e) {
@@ -287,7 +304,7 @@ async function sendKursMenu(chatId) {
             { text: PAIRS[pairKeys[3]].label, callback_data: `kurs:${pairKeys[3]}` }
         ]
     ];
-    
+
     try {
         await telegram('sendMessage', {
             chat_id: chatId,
@@ -313,7 +330,7 @@ async function sendCryptoMenu(chatId) {
             { text: '🔥 ВСЁ СРАЗУ', callback_data: 'crypto:btc+eth+sol+ton' }
         ]
     ];
-    
+
     try {
         await telegram('sendMessage', {
             chat_id: chatId,
@@ -339,7 +356,7 @@ module.exports = async (req, res) => {
     }
 
     const update = parseBody(req);
-    
+
     if (update && update.callback_query) {
         try {
             await handleCallbackQuery(update.callback_query);
@@ -348,7 +365,7 @@ module.exports = async (req, res) => {
         }
         return res.status(200).json({ status: 'callback_handled' });
     }
-    
+
     const msg = update && update.message;
     if (!msg || !msg.chat) return res.status(200).json({ status: 'No message payload' });
     if (await memory.seenUpdate(update.update_id)) return res.status(200).json({ status: 'duplicate' });
@@ -356,7 +373,6 @@ module.exports = async (req, res) => {
     const c = cfg();
     const botUsername = c.botUsername || process.env.BOT_USERNAME || 'tangjeebot';
 
-    // ИСПРАВЛЕНО: Корректная проверка на адресованность или спонтанность
     const isAddressed = shouldAnswer(msg, botUsername);
     const isSpontaneous = shouldSpontaneouslyAnswer(msg, botUsername);
 
@@ -385,7 +401,7 @@ module.exports = async (req, res) => {
         if (botUsername) userText = userText.replace(new RegExp('@' + botUsername + '\\b', 'gi'), '').trim();
 
         const marketCmd = parseMarketCommand(userText);
-        
+
         if (marketCmd && !marketCmd.arg) {
             if (marketCmd.command === 'kurs') {
                 await sendKursMenu(chatId);
@@ -411,14 +427,23 @@ module.exports = async (req, res) => {
         const isExplicitProfileRequest = /оцени|внешность|ник|аватарка|как я выгляжу|кто я|разгляди|фотка/.test(fullTextLower);
         const shouldProfile = history.length === 0 || isExplicitProfileRequest;
 
-        let contextBlocks = [];
-        contextBlocks.push(getTangTimeContext());
+        // ИСПРАВЛЕНО: время теперь как профиль - только первый контакт или прямой вопрос про время/сон
+        const isExplicitTimeRequest = /время|времени|который час|во сколько|спать|спишь|сплю|ночь|ночи|ночью|утро|утра|утром|вечер|вечера|вечером|проснул|просыпа|поздно|рано|доброе утро|добрый день|добрый вечер|доброй ночи/.test(fullTextLower);
+        const shouldTime = history.length === 0 || isExplicitTimeRequest;
 
+        let contextBlocks = [];
+
+        // 1. Контекст времени - ТОЛЬКО при первом контакте или прямом вопросе
+        if (shouldTime) {
+            contextBlocks.push(getTangTimeContext());
+        }
+
+        // 2. Инъекция рыночных данных
         if (marketCmd && marketCmd.arg) {
             try {
                 let marketData = '';
                 let marketType = '';
-                
+
                 if (marketCmd.command === 'kurs') {
                     if (PAIRS[marketCmd.arg]) {
                         const pair = PAIRS[marketCmd.arg];
@@ -433,7 +458,7 @@ module.exports = async (req, res) => {
                     marketData = await getCryptoData(coins);
                     marketType = 'КРИПТА';
                 }
-                
+
                 const jokeAngles = [
                     `Сравни эти цифры с длиной веток Жака, его тупостью или тем, сколько мандаринов ты украсть за один звонок.`,
                     `Скажи, что эта сумма меньше, чем ты найти в кармане у лошка, или что твой оффшорный счёт с краденым весит больше.`,
@@ -442,9 +467,9 @@ module.exports = async (req, res) => {
                     `Обыграй это число через абсурд: например, что за такие деньги можно купить только дырку от бублика в вахтёрской.`
                 ];
                 const randomAngle = jokeAngles[Math.floor(Math.random() * jokeAngles.length)];
-                
+
                 const instruction = `ИНСТРУКЦИЯ ДЛЯ ТАНГ: ${randomAngle} ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент, использовать фразы "мой оффшор плакать", "твои бумажки обесцениться" или "чудесно что мне есть поевать" (придумай НОВУЮ уникальную шутку). Говори ломаным русским, используй "мочь", НЕ ПЕРЕПИСЫВАЙ данные сухим списком, а вплети числа словами (например: "девяносто два с копейками"). Используй ТОЛЬКО эмодзи: ☺️ 🤗 😋 🤭 🫣. Ответ: 1-3 предложения.`;
-                
+
                 contextBlocks.push(`[СВЕЖИЕ ДАННЫЕ РЫНКА (${marketType}): ${marketData}]. ${instruction}`);
             } catch (e) {
                 console.error('Market data error:', e.message);
@@ -454,7 +479,7 @@ module.exports = async (req, res) => {
                 let marketData = '';
                 let marketType = '';
                 const text = userText.toLowerCase();
-                
+
                 if (/доллар|евро|рубль|инфляция|цены|фиат/.test(text)) {
                     marketData = await getPairData('USD', 'RUB');
                     marketType = 'ФИАТ';
@@ -469,8 +494,7 @@ module.exports = async (req, res) => {
                     marketData = `ФИАТ: ${fiat} | КРИПТА: ${crypto}`;
                     marketType = 'ОБЩЕЕ';
                 }
-                
-                // ИСПРАВЛЕНО: Убраны ссылки на несуществующую переменную 'pair' в этом контексте
+
                 const jokeAngles = [
                     `Сравни эти цифры с длиной веток Жака, его тупостью или тем, сколько мандаринов ты украсть за один звонок.`,
                     `Скажи, что эта сумма меньше, чем ты найти в кармане у лошка, или что твой оффшорный счёт с краденым весит больше.`,
@@ -479,9 +503,9 @@ module.exports = async (req, res) => {
                     `Обыграй это число через абсурд: например, что за такие деньги можно купить только дырку от бублика в вахтёрской.`
                 ];
                 const randomAngle = jokeAngles[Math.floor(Math.random() * jokeAngles.length)];
-                
+
                 const instruction = `ИНСТРУКЦИЯ ДЛЯ ТАНГ: ${randomAngle} ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент, использовать фразы "мой оффшор плакать", "твои бумажки обесцениться" или "чудесно что мне есть поевать" (придумай НОВУЮ уникальную шутку). Говори ломаным русским, используй "мочь", НЕ ПЕРЕПИСЫВАЙ данные сухим списком, а вплети числа словами (например: "девяносто два с копейками"). Используй ТОЛЬКО эмодзи: ☺️ 🤗 😋 🤭 🫣. Ответ: 1-3 предложения.`;
-                
+
                 contextBlocks.push(`[СВЕЖИЕ ДАННЫЕ РЫНКА (${marketType}): ${marketData}]. ${instruction}`);
             } catch (e) {
                 console.error('Market data error:', e.message);
@@ -494,6 +518,7 @@ module.exports = async (req, res) => {
             contextBlocks.push(`[ОН ОТВЕЧАЕТ НА СООБЩЕНИЕ ОТ ${authorName}: "${repliedText.slice(0, 500)}"]. Прокомментируй содержание этого сообщения от лица Танг. Не отвечай автору напрямую, если текущий собеседник не просил об этом. Оцени суть сказанного в цитате.`);
         }
 
+        // 3. Глубокий профилинг (СТРОГОЕ УСЛОВИЕ)
         if (shouldProfile) {
             const userProfile = analyzeUserProfile(msg);
             if (userProfile && userProfile !== 'профиль пользователя не дает интересных зацепок') {
@@ -504,7 +529,6 @@ module.exports = async (req, res) => {
         const who = isGroup ? `[${displayName(msg.from)}]: ` : '';
         const spoken = userText || (incoming.hint || linkInfo.text ? '' : 'Привет');
 
-        // ИСПРАВЛЕНО: Удалено дублирование textBlock, добавлен contextPrefix
         const textBlock = [
             contextPrefix,
             ...contextBlocks,
@@ -536,10 +560,9 @@ module.exports = async (req, res) => {
 
         await sendMessage(chatId, reply);
 
-        // ИСПРАВЛЕНО: histUser теперь объявлен ДО использования в Promise.all
         const histUser = [who + spoken, incoming.histNote, linkInfo.note].filter(Boolean).join(' ') || who + '[вложение]';
         const nextPulse = Date.now() + (c.pulseMin + Math.random() * (c.pulseMax - c.pulseMin)) * 60000;
-        
+
         await Promise.all([
             memory.addHistory(chatId, [{ r: 'u', t: histUser }, { r: 'm', t: reply }]),
             memory.touchChat(chatId),
