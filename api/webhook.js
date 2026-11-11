@@ -572,8 +572,14 @@ module.exports = async (req, res) => {
         }
 
         await sendMessage(chatId, reply);
-
-        const histUser = [who + spoken, incoming.histNote, linkInfo.note].filter(Boolean).join(' ') || who + '[вложение]';
+const textBlock = [
+            contextPrefix,
+            ...contextBlocks,
+            spoken ? who + spoken : (isGroup ? `[${displayName(msg.from)}] прислал вложение` : ''),
+            incoming.hint,
+            incoming.docText,
+            linkInfo.text
+        ].filter(Boolean).join('\n');
         const nextPulse = Date.now() + (c.pulseMin + Math.random() * (c.pulseMax - c.pulseMin)) * 60000;
         await Promise.all([
             memory.addHistory(chatId, [{ r: 'u', t: histUser }, { r: 'm', t: reply }]),
