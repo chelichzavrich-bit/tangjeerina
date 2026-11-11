@@ -34,7 +34,7 @@ const MARKET_TRIGGERS = [
     'курс', 'растёт', 'падает', 'ликвидация',
     'доллар', 'евро', 'рубль', 'инфляция', 'цены',
     'новости', 'что в мире', 'что случилось',
-    'kurs', 'crypto'
+    'курс', 'crypto'
 ];
 
 function parseBody(req) {
@@ -110,6 +110,61 @@ function parseMarketCommand(userText) {
 function shouldAnswer(msg, botUsername) {
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
     if (!isGroup || !botUsername) return true;
+    const text = (msg.text || msg.caption || '').toLowerCase();
+    if (text.includes('@' + botUsername.toLowerCase())) return true;
+    if (/^\/\w+/.test(text)) return true;
+    const repliedFrom = msg.reply_to_message && msg.reply_to_message.from;
+    return !!(repliedFrom && repliedFrom.is_bot && (repliedFrom.username || '').toLowerCase() === botUsername.toLowerCase());
+}
+
+// ═══════════════════════════════════════════════════════════════
+// СПОНТАННОЕ ВМЕШАТЕЛЬСТВО: Танг может ответить, даже если её не упоминают
+// ═══════════════════════════════════════════════════════════════
+function shouldSpontaneouslyAnswer(msg, botUsername) {
+    // Работает только в группах (в личных чатах и так всегда отвечаем)
+    const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
+    if (!isGroup) return false;
+
+    // Если сообщение уже адресовано боту — не нужно дублировать
+    const isAddressed = shouldAnswer(msg, c.botUsername);
+    const isSpontaneous = shouldSpontaneouslyAnswer(msg, c.botUsername);
+
+    if (!isAddressed && !isSpontaneous) {
+        return res.status(200).json({ status: 'ignored (not addressed)' });
+    }
+
+    // Если это спонтанное вмешательство, добавляем пометку в контекст
+    let contextPrefix = '';
+    if (isSpontaneous) {
+        contextPrefix = '[СПОНТАННОЕ ВМЕШАТЕЛЬСТВО: Танг увидела что-то интересное в чате и решила вклиниться. Она НЕ обращается напрямую к автору сообщения, а комментирует тему в своём стиле, как будто случайно услышала разговор.] ';
+        }
+
+    const text = (msg.text || msg.caption || '').toLowerCase();
+    
+    // Темы, которые интересуют Танг (её "крючки")
+    const interestingTopics = [
+        'жак', 'снеговик', 'морковка', 'мандарин', 'воровство', 'кража', 'исчезновение',
+        'крипта', 'биткоин', 'деньги', 'бабло', 'оффшор',
+        'китай', 'ночь', 'коммунизм', 'политика',
+        'пингвин', 'император', 'политика',
+        'любовь', 'бывший', 'парень', 'девушки',
+        'ава', 'интернет', 'страх', 'красив', 'умн',
+        'поивязанность', 'ночь', 'суицид', 'ненависть к себе'
+    ];
+
+    // Проверяем, есть ли в сообщении интересная тема
+    const hasInterestingTopic = interestingTopics.some(topic => text.includes(topic));
+    
+    if (!hasInterestingTopic) return false;
+
+    // Если тема интересная — бросаем кубик (30% шанс вклиниться)
+    // Это предотвращает спам, но даёт спонтанность
+    const chance = parseFloat(process.env.SPONTANEOUS_CHANCE || '0.4');
+    return Math.random() < chance;
+}
+
+// Читает ссылки из сообщения. Любая ошибка здесь не должна ломать ответ - тогда просто отвечаем без ссылок.
+async function readLinks(msg, c) {
 
     const targetUsername = botUsername.toLowerCase().replace(/^@/, '');
     const text = (msg.text || msg.caption || '').toLowerCase();
