@@ -34,7 +34,7 @@ const MARKET_TRIGGERS = [
     'курс', 'растёт', 'падает', 'ликвидация',
     'доллар', 'евро', 'рубль', 'инфляция', 'цены',
     'новости', 'что в мире', 'что случилось',
-    'курс', 'crypto'
+    'crypto'
 ];
 
 function parseBody(req) {
@@ -121,69 +121,27 @@ function shouldAnswer(msg, botUsername) {
 // СПОНТАННОЕ ВМЕШАТЕЛЬСТВО: Танг может ответить, даже если её не упоминают
 // ═══════════════════════════════════════════════════════════════
 function shouldSpontaneouslyAnswer(msg, botUsername) {
-    // Работает только в группах (в личных чатах и так всегда отвечаем)
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
     if (!isGroup) return false;
-
-    // Если сообщение уже адресовано боту — не нужно дублировать
-    const isAddressed = shouldAnswer(msg, c.botUsername);
-    const isSpontaneous = shouldSpontaneouslyAnswer(msg, c.botUsername);
-
-    if (!isAddressed && !isSpontaneous) {
-        return res.status(200).json({ status: 'ignored (not addressed)' });
-    }
-
-    // Если это спонтанное вмешательство, добавляем пометку в контекст
-    let contextPrefix = '';
-    if (isSpontaneous) {
-        contextPrefix = '[СПОНТАННОЕ ВМЕШАТЕЛЬСТВО: Танг увидела что-то интересное в чате и решила вклиниться. Она НЕ обращается напрямую к автору сообщения, а комментирует тему в своём стиле, как будто случайно услышала разговор.] ';
-        }
+    if (shouldAnswer(msg, botUsername)) return false; // Не дублировать, если уже адресовано
 
     const text = (msg.text || msg.caption || '').toLowerCase();
     
-    // Темы, которые интересуют Танг (её "крючки")
     const interestingTopics = [
         'жак', 'снеговик', 'морковка', 'мандарин', 'воровство', 'кража', 'исчезновение',
         'крипта', 'биткоин', 'деньги', 'бабло', 'оффшор',
         'китай', 'ночь', 'коммунизм', 'политика',
-        'пингвин', 'император', 'политика',
+        'пингвин', 'император',
         'любовь', 'бывший', 'парень', 'девушки',
         'ава', 'интернет', 'страх', 'красив', 'умн',
-        'поивязанность', 'ночь', 'суицид', 'ненависть к себе'
+        'привязанность', 'суицид', 'ненависть к себе'
     ];
 
-    // Проверяем, есть ли в сообщении интересная тема
     const hasInterestingTopic = interestingTopics.some(topic => text.includes(topic));
-    
     if (!hasInterestingTopic) return false;
 
-    // Если тема интересная — бросаем кубик (30% шанс вклиниться)
-    // Это предотвращает спам, но даёт спонтанность
     const chance = parseFloat(process.env.SPONTANEOUS_CHANCE || '0.4');
     return Math.random() < chance;
-}
-
-// Читает ссылки из сообщения. Любая ошибка здесь не должна ломать ответ - тогда просто отвечаем без ссылок.
-async function readLinks(msg, c) {
-
-    const targetUsername = botUsername.toLowerCase().replace(/^@/, '');
-    const text = (msg.text || msg.caption || '').toLowerCase();
-    const replyText = (msg.reply_to_message && (msg.reply_to_message.text || msg.reply_to_message.caption) || '').toLowerCase();
-    const fullText = text + ' ' + replyText;
-
-    if (fullText.includes('@' + targetUsername)) return true;
-    const usernameRe = new RegExp('(^|[^a-z0-9_])' + targetUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '([^a-z0-9_]|$)');
-    if (usernameRe.test(fullText)) return true;
-    if (/^\/\w+/.test(text)) return true;
-
-    const repliedFrom = msg.reply_to_message && msg.reply_to_message.from;
-    if (repliedFrom && repliedFrom.is_bot) {
-        const repliedUsername = (repliedFrom.username || '').toLowerCase().replace(/^@/, '');
-        if (repliedUsername === targetUsername) return true;
-    }
-
-    if (checkTriggers(msg)) return true;
-    return false;
 }
 
 function analyzeUserProfile(msg) {
@@ -261,8 +219,8 @@ async function handleCallbackQuery(callbackQuery) {
         const rate = await getPairData(pair.from, pair.to);
         
         const jokeAngles = [
-            `Сравни курс ${pair.from}/${pair.to} с "длина см Жака, когда он рад меня видеть 🥰" или тем, сколько мандаринов ты украсть за один звонок.`,
-            `Скажи, что эта сумма меньше, "чем твой шансы вылазить из мамкин подвала, поздравляю 😋", или что твой оффшорный счёт с краденым весит больше.`,
+            `Сравни курс ${pair.from}/${pair.to} с "длина см Жака, когда он рад меня видеть" или тем, сколько мандаринов ты украсть за один звонок.`,
+            `Скажи, что эта сумма меньше, "чем твой шансы вылазить из мамкин подвала, поздравляю", или что твой оффшорный счёт с краденым весит больше.`,
             `Назови эту валюту фантиком из ЛНР или мусором, который даже бомж не подобрать, и посмейся над тем, кто её держит.`,
             `Скажи, что разница в курсе или само число меньше, чем IQ собеседника, и предложи ему идти работать за копейки или лизать ей пятки бесплатно.`,
             `Обыграй это число через абсурд: например, что за такие деньги можно купить только дырку от бублика в вахтёрской.`
@@ -279,7 +237,6 @@ async function handleCallbackQuery(callbackQuery) {
             await memory.addHistory(chatId, [{ r: 'u', t: `[нажал кнопку: курс ${pair.label}]` }, { r: 'm', t: text }]);
         } catch (e) {
             console.error('Market reply generation error:', e.message);
-            // ИСПРАВЛЕНО: убрана шаблонная фраза про "поевать"
             replyText = `Мой идеальный компьютер сломать этот курс, но ты всё равно лох, раз спрашивать у меня 🤭`;
         }
     } else if (type === 'crypto') {
@@ -305,7 +262,6 @@ async function handleCallbackQuery(callbackQuery) {
             await memory.addHistory(chatId, [{ r: 'u', t: `[нажал кнопку: крипта ${coins.join(',')}]` }, { r: 'm', t: text }]);
         } catch (e) {
             console.error('Crypto reply generation error:', e.message);
-            // ИСПРАВЛЕНО: убрана шаблонная фраза про "оффшор плакать"
             replyText = `Крипта сломать мой парсер, но мой украденный портфель всё равно жирнее твоего 🫣`;
         }
     } else {
@@ -400,7 +356,18 @@ module.exports = async (req, res) => {
     const c = cfg();
     const botUsername = c.botUsername || process.env.BOT_USERNAME || 'tangjeebot';
 
-    if (!shouldAnswer(msg, botUsername)) return res.status(200).json({ status: 'ignored (not addressed)' });
+    // ИСПРАВЛЕНО: Корректная проверка на адресованность или спонтанность
+    const isAddressed = shouldAnswer(msg, botUsername);
+    const isSpontaneous = shouldSpontaneouslyAnswer(msg, botUsername);
+
+    if (!isAddressed && !isSpontaneous) {
+        return res.status(200).json({ status: 'ignored (not addressed)' });
+    }
+
+    let contextPrefix = '';
+    if (isSpontaneous) {
+        contextPrefix = '[СПОНТАННОЕ ВМЕШАТЕЛЬСТВО: Танг увидела что-то интересное в чате и решила вклиниться. Она НЕ обращается напрямую к автору сообщения, а комментирует тему в своём стиле, как будто случайно услышала разговор.] ';
+    }
 
     const chatId = msg.chat.id;
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
@@ -441,18 +408,12 @@ module.exports = async (req, res) => {
         const history = await memory.getHistory(chatId);
 
         const fullTextLower = (userText + ' ' + (repliedText || '')).toLowerCase();
-        // ИСПРАВЛЕНО: Жесткие триггеры только для явной просьбы
         const isExplicitProfileRequest = /оцени|внешность|ник|аватарка|как я выгляжу|кто я|разгляди|фотка/.test(fullTextLower);
-        
-        // ИСПРАВЛЕНО: Профилируем ТОЛЬКО если история пуста (первый контакт) ИЛИ есть прямая просьба
         const shouldProfile = history.length === 0 || isExplicitProfileRequest;
 
         let contextBlocks = [];
-
-        // 1. Добавляем контекст времени
         contextBlocks.push(getTangTimeContext());
 
-        // 2. Инъекция рыночных данных
         if (marketCmd && marketCmd.arg) {
             try {
                 let marketData = '';
@@ -509,13 +470,14 @@ module.exports = async (req, res) => {
                     marketType = 'ОБЩЕЕ';
                 }
                 
+                // ИСПРАВЛЕНО: Убраны ссылки на несуществующую переменную 'pair' в этом контексте
                 const jokeAngles = [
-    `Сравни курс ${pair.from}/${pair.to} с "длина веточки Жака, когда я нет рядом и когда он рад меня видеть" или тем, сколько мандаринов ты украсть за один звонок.`,
-    `Скажи, что эта сумма меньше, "чем твой шансы вылазить из мамкин подвала, поздравляю", или что твой оффшорный счёт с краденым весит больше.`,
-    `Назови эту валюту фантиком из ЛНР или мусором, который даже бомж не подобрать, и посмейся над тем, кто её держит.`,
-    `Скажи, что разница в курсе или само число меньше, чем IQ собеседника, и предложи ему идти работать за копейки или лизать ей пятки бесплатно.`,
-    `Обыграй это число через абсурд: например, что за такие деньги можно купить только дырку от бублика в вахтёрской.`
-];
+                    `Сравни эти цифры с длиной веток Жака, его тупостью или тем, сколько мандаринов ты украсть за один звонок.`,
+                    `Скажи, что эта сумма меньше, чем ты найти в кармане у лошка, или что твой оффшорный счёт с краденым весит больше.`,
+                    `Назови эту валюту фантиком из ЛНР или мусором, который даже бомж не подобрать, и посмейся над тем, кто её держит.`,
+                    `Скажи, что разница в курсе или само число меньше, чем IQ собеседника, и предложи ему идти работать за копейки.`,
+                    `Обыграй это число через абсурд: например, что за такие деньги можно купить только дырку от бублика в вахтёрской.`
+                ];
                 const randomAngle = jokeAngles[Math.floor(Math.random() * jokeAngles.length)];
                 
                 const instruction = `ИНСТРУКЦИЯ ДЛЯ ТАНГ: ${randomAngle} ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент, использовать фразы "мой оффшор плакать", "твои бумажки обесцениться" или "чудесно что мне есть поевать" (придумай НОВУЮ уникальную шутку). Говори ломаным русским, используй "мочь", НЕ ПЕРЕПИСЫВАЙ данные сухим списком, а вплети числа словами (например: "девяносто два с копейками"). Используй ТОЛЬКО эмодзи: ☺️ 🤗 😋 🤭 🫣. Ответ: 1-3 предложения.`;
@@ -532,7 +494,6 @@ module.exports = async (req, res) => {
             contextBlocks.push(`[ОН ОТВЕЧАЕТ НА СООБЩЕНИЕ ОТ ${authorName}: "${repliedText.slice(0, 500)}"]. Прокомментируй содержание этого сообщения от лица Танг. Не отвечай автору напрямую, если текущий собеседник не просил об этом. Оцени суть сказанного в цитате.`);
         }
 
-        // 3. Глубокий профилинг (СТРОГОЕ УСЛОВИЕ)
         if (shouldProfile) {
             const userProfile = analyzeUserProfile(msg);
             if (userProfile && userProfile !== 'профиль пользователя не дает интересных зацепок') {
@@ -543,7 +504,9 @@ module.exports = async (req, res) => {
         const who = isGroup ? `[${displayName(msg.from)}]: ` : '';
         const spoken = userText || (incoming.hint || linkInfo.text ? '' : 'Привет');
 
+        // ИСПРАВЛЕНО: Удалено дублирование textBlock, добавлен contextPrefix
         const textBlock = [
+            contextPrefix,
             ...contextBlocks,
             spoken ? who + spoken : (isGroup ? `[${displayName(msg.from)}] прислал вложение` : ''),
             incoming.hint,
@@ -572,15 +535,11 @@ module.exports = async (req, res) => {
         }
 
         await sendMessage(chatId, reply);
-const textBlock = [
-            contextPrefix,
-            ...contextBlocks,
-            spoken ? who + spoken : (isGroup ? `[${displayName(msg.from)}] прислал вложение` : ''),
-            incoming.hint,
-            incoming.docText,
-            linkInfo.text
-        ].filter(Boolean).join('\n');
+
+        // ИСПРАВЛЕНО: histUser теперь объявлен ДО использования в Promise.all
+        const histUser = [who + spoken, incoming.histNote, linkInfo.note].filter(Boolean).join(' ') || who + '[вложение]';
         const nextPulse = Date.now() + (c.pulseMin + Math.random() * (c.pulseMax - c.pulseMin)) * 60000;
+        
         await Promise.all([
             memory.addHistory(chatId, [{ r: 'u', t: histUser }, { r: 'm', t: reply }]),
             memory.touchChat(chatId),
