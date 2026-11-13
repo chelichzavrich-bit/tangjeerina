@@ -1,41 +1,62 @@
-name: Voice Ping Trigger
+# Танг Джи Рина - Telegram-бот (Vercel + Gemini, бесплатно)
 
-on:
-  schedule:
-    - cron: '0 */5 * * *'
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: 'What to run'
-        required: true
-        default: 'daily'
-        type: choice
-        options:
-          - daily
-          - voice
-      voice_force:
-        description: 'Force voice (ignore 48h + coin)'
-        required: true
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
+## Структура
+```
+api/webhook.js      - приём сообщений Telegram; решает, отвечать ли, и собирает ответ
+api/pulse.js        - вход для «будильника» (тонкая обёртка над lib/pulse.js)
+lib/persona.js      - ХАРАКТЕР И ЛОР Танг (не менять!)
+lib/prompts.js      - дополнительные правила: поведение в чате, акценты на фото, подписи к голосовым
+lib/context.js      - время Танг (UTC-5), настроение, слова-триггеры, справка об участниках
+lib/ai.js           - Gemini: цепочка моделей, повторы при блокировке фильтром
+lib/memory.js       - память чата: история ВСЕХ участников, участники, служебные поля (Upstash Redis)
+lib/pulse.js        - сама пишет при тишине 12 ч + голосовой пинг раз в ~2 дня
+lib/files.js        - чтение фото / PDF / DOCX / TXT / голосовых / видео
+lib/links.js        - чтение ссылок: YouTube (в т.ч. сам ролик), Telegram-каналы, сайты, картинки
+lib/market.js       - курсы валют и крипты
+lib/telegram.js     - отправка сообщений, скачивание файлов
+lib/fallbacks.js    - запасные «злые» отговорки при сбое
+.github/workflows/voice-ping.yml - бесплатный будильник (раз в час)
+```
 
-concurrency:
-  group: voice-ping-${{ github.ref }}
-  cancel-in-progress: false
+## 1. Переменные окружения (Vercel → Settings → Environment Variables → Production)
+Обязательные: `TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`, `CRON_SECRET`.
+Остальное - см. `.env.example` (значения по умолчанию рабочие).
+После любого изменения переменных нужен **Redeploy**.
 
-jobs:
-  trigger-pulse:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger Vercel Pulse Endpoint
-        run: |
-          URL="${{ secrets.PULSE_URL }}"
-          if [ "${{ github.event.inputs.mode }}" = "voice" ]; then URL="$URL&voice=1"; fi
-          if [ "${{ github.event.inputs.voice_force }}" = "true" ]; then URL="$URL&voice_force=1"; fi
-          curl -X POST "$URL" \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            -H "Content-Type: application/json" \
-            -d '{"type":"voice"}'
+## 2. Память (обязательно для «живого» режима)
+Vercel → Storage / Marketplace → **Upstash Redis** → бесплатный план → Connect to Project → Redeploy.
+Без Redis бот отвечает, но не помнит чат и не пишет сам.
+
+## 3. Вебхук (один раз)
+```
+https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://<проект>.vercel.app/api/webhook
+```
+(если задан `TELEGRAM_WEBHOOK_SECRET`, добавьте `&secret_token=<то же значение>`).
+
+## 4. ВАЖНО: чтобы она видела весь чат
+В @BotFather: `/mybots` → бот → Bot Settings → Group Privacy → **Turn off**.
+Затем удалите бота из группы и добавьте снова (или сделайте его админом). Без этого Telegram не присылает боту сообщения,
+где его не упомянули, и «участницей чата» она быть не сможет.
+
+## 5. Будильник (GitHub Actions)
+Репозиторий → Settings → Secrets and variables → Actions → добавить:
+`PULSE_URL` = `https://<проект>.vercel.app/api/pulse`, `CRON_SECRET` = то же значение, что в Vercel.
+Каждый час бот сам решает: пора ли написать в тихий чат и пора ли отправить голосовое.
+Проверка голосового вручную: вкладка Actions → Pulse Trigger → Run workflow → `voice_force`.
+
+## 6. Голосовое
+Отправьте заготовленное голосовое **самому боту в личку**, затем откройте
+`https://api.telegram.org/bot<TOKEN>/getUpdates` и найдите `"voice":{... "file_id":"..."}`.
+Это значение - в `DAILY_VOICE_FILE_ID` (можно несколько через запятую). file_id работает только для того бота, который его получил.
+Жертву бот выбирает случайно из тех, кого видел в чате за 14 дней.
+
+## Как она решает, отвечать ли
+- **Всегда**: личка, @упоминание, ответ на её сообщение, команда, обращение «Танг»/«Танджи».
+- **Иногда** (шанс + кулдаун 4 мин + максимум 6 в час): лор-слова без пинга, ссылки, фото, новички, просто так.
+  Утром и вечером чаще, ночью реже. Шансы настраиваются в `.env.example`.
+- Все сообщения чата она запоминает, поэтому видит контекст беседы.
+- На тяжёлые темы (самоповреждение) сама не вклинивается, а в прямом ответе выходит из шоу-режима.
+
+## Чтение ссылок
+YouTube (название, канал, описание, превью и первые `YOUTUBE_VIDEO_SECONDS` секунд самого ролика через Gemini; только публичные видео),
+публичные Telegram-каналы и посты, обычные сайты, картинки, PDF, Reddit. Отключить: `LINK_PARSING=off`.
