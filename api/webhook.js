@@ -1,5 +1,4 @@
 // Telegram webhook: Танг Джи Рина (Vercel + Google Gemini).
-// Логика разложена по модулям в папке lib/. Текст персонажа лежит в lib/persona.js.
 const { cfg } = require('../lib/config');
 const memory = require('../lib/memory');
 const { telegram, sendMessage } = require('../lib/telegram');
@@ -9,6 +8,8 @@ const { generateReply, buildContents } = require('../lib/ai');
 const { randomFallback } = require('../lib/fallbacks');
 const { handlePulseRequest } = require('../lib/pulse');
 const { getFiatData, getCryptoData, getPairData, PAIRS } = require('../lib/market');
+const ctx = require('../lib/context');
+const { DISTRESS_RULES } = require('../lib/prompts');
 
 // ═══════════════════════════════════════════════════════════════
 // ЖЁСТКИЙ WATCHLIST
@@ -52,14 +53,14 @@ const displayName = (from) => (from && (from.first_name || from.username)) || '�
 function getTangTimeContext() {
     const now = new Date();
     const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
-    const tangTime = new Date(utc + (3600000 * -5)); // UTC-5
+    const tangTime = new Date(utc + (3600000 * -5));
     const hours = tangTime.getHours();
 
     let period = '';
     if (hours >= 5 && hours < 12) period = 'утро (она бодра, голодна и готова грабить)';
     else if (hours >= 12 && hours < 18) period = 'день (она активна, ищет лохов в интернете)';
     else if (hours >= 18 && hours < 23) period = 'вечер (пик активности, время троллинга и абсурда)';
-    else period = 'ночь (она хочет спать, злая, или делает вид, что спит, чтобы её не трогали. Это её оправдание, чтобы идти спать или огрызаться)';
+    else period = 'ночь (она хочет спать, злая, или делает вид, что спит, чтобы её не трогали)';
 
     return `[КОНТЕКСТ ВРЕМЕНИ: Сейчас у Танг часовой пояс UTC-5, на часах ${hours}:00. Сейчас у неё ${period}. Учитывай это как своё внутреннее состояние, но НЕ сообщай время и НЕ упоминай его в ответе, если собеседник прямо не спросил про время, сон, утро или вечер.]`;
 }
@@ -107,9 +108,6 @@ function parseMarketCommand(userText) {
     return { command, arg };
 }
 
-// ═══════════════════════════════════════════════════════════════
-// ВОССТАНОВЛЕНО: полная проверка адресованности, включая WATCHLIST-триггеры
-// ═══════════════════════════════════════════════════════════════
 function shouldAnswer(msg, botUsername) {
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
     if (!isGroup || !botUsername) return true;
@@ -134,13 +132,10 @@ function shouldAnswer(msg, botUsername) {
     return false;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// СПОНТАННОЕ ВМЕШАТЕЛЬСТВО: Танг может ответить, даже если её не упоминают
-// ═══════════════════════════════════════════════════════════════
 function shouldSpontaneouslyAnswer(msg, botUsername) {
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
     if (!isGroup) return false;
-    if (shouldAnswer(msg, botUsername)) return false; // Не дублировать, если уже адресовано
+    if (shouldAnswer(msg, botUsername)) return false;
 
     const text = (msg.text || msg.caption || '').toLowerCase();
 
@@ -151,7 +146,7 @@ function shouldSpontaneouslyAnswer(msg, botUsername) {
         'пингвин', 'император',
         'любовь', 'бывший', 'парень', 'девушки',
         'ава', 'интернет', 'страх', 'красив', 'умн',
-        'привязанность', 'суицид', 'ненависть к себе'
+        'привязанность'
     ];
 
     const hasInterestingTopic = interestingTopics.some(topic => text.includes(topic));
@@ -244,14 +239,15 @@ async function handleCallbackQuery(callbackQuery) {
         ];
         const randomAngle = jokeAngles[Math.floor(Math.random() * jokeAngles.length)];
 
-        const prompt = `[СВЕЖИЕ ДАННЫЕ РЫНКА (ФИАТ): ${rate}]. ИНСТРУКЦИЯ ДЛЯ ТАНГ: ${randomAngle} ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент, использовать фразы "мой оффшор плакать" или "твои бумажки обесцениться" или "чудесно что мне есть поевать" (придумай НОВУЮ уникальную шутку). Говори ломаным русским, используй "мочь", "имею", "победю", пиши числа искаженными словами (например: "девяноса два и копейками"). Используй ТОЛЬКО эмодзи: ☺️ 🤗 😋 🤭 🫣. Ответ: 1-3 предложения.`;
+        const prompt = `[СВЕЖИЕ ДАННЫЕ РЫНКА (ФИАТ): ${rate}]. ИНСТРУКЦИЯ ДЛЯ ТАНГ: ${randomAngle} ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент, использовать фразы "мой оффшор плакать" или "твои бумажки обесцениться" или "чудесно что мне есть поевать" (придумай НОВУЮ уникальную шутку). Говори ломаным русским, используй "мочь", "имею", "победю", пиши числа искаженными словами. Используй ТОЛЬКО эмодзи: ☺️ 🤗 😋 🤭 🫣. Ответ: 1-3 предложения.`;
 
         try {
             const history = await memory.getHistory(chatId);
             const contents = buildContents(history, [{ text: prompt }]);
             const { text } = await generateReply(contents, { userLen: 100, deadline: Date.now() + 20000 });
             replyText = text;
-            await memory.addHistory(chatId, [{ r: 'u', t: `[нажал кнопку: курс ${pair.label}]` }, { r: 'm', t: text }]);
+            await memory.logIncoming(chatId, [{ r: 'u', t: `[нажал кнопку: курс ${pair.label}]` }], { type: 'private', user: callbackQuery.from });
+            await memory.logBot(chatId, [{ r: 'm', t: text }]);
         } catch (e) {
             console.error('Market reply generation error:', e.message);
             replyText = `Мой идеальный компьютер сломать этот курс, но ты всё равно лох, раз спрашивать у меня 🤭`;
@@ -276,7 +272,8 @@ async function handleCallbackQuery(callbackQuery) {
             const contents = buildContents(history, [{ text: prompt }]);
             const { text } = await generateReply(contents, { userLen: 100, deadline: Date.now() + 20000 });
             replyText = text;
-            await memory.addHistory(chatId, [{ r: 'u', t: `[нажал кнопку: крипта ${coins.join(',')}]` }, { r: 'm', t: text }]);
+            await memory.logIncoming(chatId, [{ r: 'u', t: `[нажал кнопку: крипта ${coins.join(',')}]` }], { type: 'private', user: callbackQuery.from });
+            await memory.logBot(chatId, [{ r: 'm', t: text }]);
         } catch (e) {
             console.error('Crypto reply generation error:', e.message);
             replyText = `Крипта сломать мой парсер, но мой украденный портфель всё равно жирнее твоего 🫣`;
@@ -373,16 +370,36 @@ module.exports = async (req, res) => {
     const c = cfg();
     const botUsername = c.botUsername || process.env.BOT_USERNAME || 'tangjeebot';
 
-    const isAddressed = shouldAnswer(msg, botUsername);
-    const isSpontaneous = shouldSpontaneouslyAnswer(msg, botUsername);
+    const replied = msg.reply_to_message;
+    const repliedText = replied && (replied.text || replied.caption);
 
-    if (!isAddressed && !isSpontaneous) {
+    // ── Проверка беды ПЕРВОЙ: если сработала, отвечаем всегда, игнорируя кулдауны и лимиты ──
+    const fullTextForCheck = ((msg.text || msg.caption || '') + ' ' + (repliedText || '')).toLowerCase();
+    const isDistress = ctx.hasDistress(fullTextForCheck);
+
+    let mode = 'skip';
+    if (isDistress) {
+        mode = 'distress';
+    } else {
+        const isAddressed = shouldAnswer(msg, botUsername);
+        const isSpontaneous = shouldSpontaneouslyAnswer(msg, botUsername);
+        if (isAddressed) mode = 'direct';
+        else if (isSpontaneous) mode = 'spontaneous';
+    }
+
+    if (mode === 'skip') {
+        // Даже проигнорированное сообщение записываем в память — она должна видеть контекст чата
+        const who = (msg.chat.type === 'group' || msg.chat.type === 'supergroup') ? `[${displayName(msg.from)}]` : '';
+        const text = msg.text || msg.caption || '[вложение]';
+        await memory.logIncoming(msg.chat.id, [{ r: 'u', t: who + ' ' + text }], { type: msg.chat.type === 'private' ? 'private' : 'group', user: msg.from });
         return res.status(200).json({ status: 'ignored (not addressed)' });
     }
 
     let contextPrefix = '';
-    if (isSpontaneous) {
+    if (mode === 'spontaneous') {
         contextPrefix = '[СПОНТАННОЕ ВМЕШАТЕЛЬСТВО: Танг увидела что-то интересное в чате и решила вклиниться. Она НЕ обращается напрямую к автору сообщения, а комментирует тему в своём стиле, как будто случайно услышала разговор.] ';
+    } else if (mode === 'distress') {
+        contextPrefix = '';
     }
 
     const chatId = msg.chat.id;
@@ -405,12 +422,12 @@ module.exports = async (req, res) => {
         if (marketCmd && !marketCmd.arg) {
             if (marketCmd.command === 'kurs') {
                 await sendKursMenu(chatId);
-                await memory.touchChat(chatId);
+                await memory.logIncoming(chatId, [{ r: 'u', t: userText || '/kurs' }], { type: isGroup ? 'group' : 'private', user: msg.from });
                 return res.status(200).json({ status: 'kurs_menu_sent' });
             }
             if (marketCmd.command === 'crypto') {
                 await sendCryptoMenu(chatId);
-                await memory.touchChat(chatId);
+                await memory.logIncoming(chatId, [{ r: 'u', t: userText || '/crypto' }], { type: isGroup ? 'group' : 'private', user: msg.from });
                 return res.status(200).json({ status: 'crypto_menu_sent' });
             }
         }
@@ -419,26 +436,25 @@ module.exports = async (req, res) => {
             userText = 'Привет! (человек только что запустил бота - поздоровайся в образе)';
         }
 
-        const replied = msg.reply_to_message;
-        const repliedText = replied && (replied.text || replied.caption);
         const history = await memory.getHistory(chatId);
 
         const fullTextLower = (userText + ' ' + (repliedText || '')).toLowerCase();
         const isExplicitProfileRequest = /оцени|внешность|ник|аватарка|как я выгляжу|кто я|разгляди|фотка/.test(fullTextLower);
         const shouldProfile = history.length === 0 || isExplicitProfileRequest;
 
-        // ИСПРАВЛЕНО: время теперь как профиль - только первый контакт или прямой вопрос про время/сон
         const isExplicitTimeRequest = /время|времени|который час|во сколько|спать|спишь|сплю|ночь|ночи|ночью|утро|утра|утром|вечер|вечера|вечером|проснул|просыпа|поздно|рано|доброе утро|добрый день|добрый вечер|доброй ночи/.test(fullTextLower);
         const shouldTime = history.length === 0 || isExplicitTimeRequest;
 
         let contextBlocks = [];
 
-        // 1. Контекст времени - ТОЛЬКО при первом контакте или прямом вопросе
-        if (shouldTime) {
-            contextBlocks.push(getTangTimeContext());
+        // ── Режим "грубая забота" перекрывает всё: время и профиль не добавляем, только DISTRESS_RULES ──
+        if (mode === 'distress') {
+            contextBlocks.push(DISTRESS_RULES);
+        } else {
+            if (shouldTime) contextBlocks.push(getTangTimeContext());
         }
 
-        // 2. Инъекция рыночных данных
+        // Инъекция рыночных данных
         if (marketCmd && marketCmd.arg) {
             try {
                 let marketData = '';
@@ -468,7 +484,7 @@ module.exports = async (req, res) => {
                 ];
                 const randomAngle = jokeAngles[Math.floor(Math.random() * jokeAngles.length)];
 
-                const instruction = `ИНСТРУКЦИЯ ДЛЯ ТАНГ: ${randomAngle} ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент, использовать фразы "мой оффшор плакать", "твои бумажки обесцениться" или "чудесно что мне есть поевать" (придумай НОВУЮ уникальную шутку). Говори ломаным русским, используй "мочь", НЕ ПЕРЕПИСЫВАЙ данные сухим списком, а вплети числа словами (например: "девяносто два с копейками"). Используй ТОЛЬКО эмодзи: ☺️ 🤗 😋 🤭 🫣. Ответ: 1-3 предложения.`;
+                const instruction = `ИНСТРУКЦИЯ ДЛЯ ТАНГ: ${randomAngle} ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент, использовать фразы "мой оффшор плакать", "твои бумажки обесцениться" или "чудесно что мне есть поевать". Говори ломаным русским, используй "мочь", НЕ ПЕРЕПИСЫВАЙ данные сухим списком, а вплети числа словами. Используй ТОЛЬКО эмодзи: ☺️ 🤗 😋 🤭 🫣. Ответ: 1-3 предложения.`;
 
                 contextBlocks.push(`[СВЕЖИЕ ДАННЫЕ РЫНКА (${marketType}): ${marketData}]. ${instruction}`);
             } catch (e) {
@@ -504,7 +520,7 @@ module.exports = async (req, res) => {
                 ];
                 const randomAngle = jokeAngles[Math.floor(Math.random() * jokeAngles.length)];
 
-                const instruction = `ИНСТРУКЦИЯ ДЛЯ ТАНГ: ${randomAngle} ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент, использовать фразы "мой оффшор плакать", "твои бумажки обесцениться" или "чудесно что мне есть поевать" (придумай НОВУЮ уникальную шутку). Говори ломаным русским, используй "мочь", НЕ ПЕРЕПИСЫВАЙ данные сухим списком, а вплети числа словами (например: "девяносто два с копейками"). Используй ТОЛЬКО эмодзи: ☺️ 🤗 😋 🤭 🫣. Ответ: 1-3 предложения.`;
+                const instruction = `ИНСТРУКЦИЯ ДЛЯ ТАНГ: ${randomAngle} ЗАПРЕЩЕНО: давать финансовые советы, писать как ИИ-ассистент, использовать фразы "мой оффшор плакать", "твои бумажки обесцениться" или "чудесно что мне есть поевать". Говори ломаным русским, используй "мочь", НЕ ПЕРЕПИСЫВАЙ данные сухим списком, а вплети числа словами. Используй ТОЛЬКО эмодзи: ☺️ 🤗 😋 🤭 🫣. Ответ: 1-3 предложения.`;
 
                 contextBlocks.push(`[СВЕЖИЕ ДАННЫЕ РЫНКА (${marketType}): ${marketData}]. ${instruction}`);
             } catch (e) {
@@ -518,8 +534,8 @@ module.exports = async (req, res) => {
             contextBlocks.push(`[ОН ОТВЕЧАЕТ НА СООБЩЕНИЕ ОТ ${authorName}: "${repliedText.slice(0, 500)}"]. Прокомментируй содержание этого сообщения от лица Танг. Не отвечай автору напрямую, если текущий собеседник не просил об этом. Оцени суть сказанного в цитате.`);
         }
 
-        // 3. Глубокий профилинг (СТРОГОЕ УСЛОВИЕ)
-        if (shouldProfile) {
+        // Глубокий профилинг (только не в режиме distress)
+        if (mode !== 'distress' && shouldProfile) {
             const userProfile = analyzeUserProfile(msg);
             if (userProfile && userProfile !== 'профиль пользователя не дает интересных зацепок') {
                 contextBlocks.push(`[ДОСЬЕ ПОЛЬЗОВАТЕЛЯ: ${userProfile}]. ВНИМАНИЕ: Это ПЕРВЫЙ контакт или прямая просьба. Используй это для язвительного комментария. В СЛЕДУЮЩИХ сообщениях КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО упоминать аватарку или ник, если тебя прямо не просят снова.]`);
@@ -539,7 +555,7 @@ module.exports = async (req, res) => {
         ].filter(Boolean).join('\n');
 
         let userAvatar = null;
-        if (shouldProfile && msg.from) {
+        if (mode !== 'distress' && shouldProfile && msg.from) {
             userAvatar = await getUserAvatar(msg.from.id);
         }
 
@@ -560,18 +576,15 @@ module.exports = async (req, res) => {
 
         await sendMessage(chatId, reply);
 
+        // Записываем в память: сначала сообщение человека, потом ответ бота (новый memory API)
         const histUser = [who + spoken, incoming.histNote, linkInfo.note].filter(Boolean).join(' ') || who + '[вложение]';
-        const nextPulse = Date.now() + (c.pulseMin + Math.random() * (c.pulseMax - c.pulseMin)) * 60000;
-
-        await Promise.all([
-            memory.addHistory(chatId, [{ r: 'u', t: histUser }, { r: 'm', t: reply }]),
-            memory.touchChat(chatId),
-            memory.setMeta(chatId, { next: nextPulse, unanswered: 0 })
-        ]);
+        await memory.logIncoming(chatId, [{ r: 'u', t: histUser }], { type: isGroup ? 'group' : 'private', user: msg.from });
+        await memory.logBot(chatId, [{ r: 'm', t: reply }]);
 
         return res.status(200).json({ status: 'success' });
     } catch (error) {
         console.error('Webhook processing error:', error);
+        // На беду отвечаем даже при сбое Gemini — не даём человеку остаться в пустоте
         try { await sendMessage(chatId, randomFallback()); } catch (_) { /* ignore */ }
         return res.status(200).json({ status: 'error_handled', message: error.message });
     }
