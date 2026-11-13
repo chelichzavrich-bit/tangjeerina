@@ -4,6 +4,23 @@ on:
   schedule:
     - cron: '0 */5 * * *'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'What to run'
+        required: true
+        default: 'daily'
+        type: choice
+        options:
+          - daily
+          - voice
+      voice_force:
+        description: 'Force voice (ignore 48h + coin)'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 concurrency:
   group: voice-ping-${{ github.ref }}
@@ -15,7 +32,10 @@ jobs:
     steps:
       - name: Trigger Vercel Pulse Endpoint
         run: |
-          curl -X POST "${{ secrets.PULSE_URL }}" \
+          URL="${{ secrets.PULSE_URL }}"
+          if [ "${{ github.event.inputs.mode }}" = "voice" ]; then URL="$URL&voice=1"; fi
+          if [ "${{ github.event.inputs.voice_force }}" = "true" ]; then URL="$URL&voice_force=1"; fi
+          curl -X POST "$URL" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             -H "Content-Type: application/json" \
-            -d '{"type": "voice"}'
+            -d '{"type":"voice"}'
