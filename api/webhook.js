@@ -7,7 +7,7 @@ const { extractUrls, parseLinks, describeLinks } = require('../lib/links');
 const { generateReply, buildContents } = require('../lib/ai');
 const { randomFallback } = require('../lib/fallbacks');
 const { handlePulseRequest } = require('../lib/pulse');
-const { getFiatData, getCryptoData, getPairData, PAIRS } = require('../lib/market');
+const { getCryptoData, getPairData, PAIRS } = require('../lib/market');
 const ctx = require('../lib/context');
 const { DISTRESS_RULES } = require('../lib/prompts');
 
@@ -439,7 +439,7 @@ module.exports = async (req, res) => {
         const history = await memory.getHistory(chatId);
 
         const fullTextLower = (userText + ' ' + (repliedText || '')).toLowerCase();
-        const isExplicitProfileRequest = /оцени|внешность|ник|аватарка|как я выгляжу|кто я|разгляди|фотка/.test(fullTextLower);
+        const isExplicitProfileRequest = /оцени|внешность|мой ник|мой юзернейм|аватарк|как я выгляжу|кто я так|разгляди|фотк/.test(fullTextLower);
         const shouldProfile = history.length === 0 || isExplicitProfileRequest;
 
         const isExplicitTimeRequest = /время|времени|который час|во сколько|спать|спишь|сплю|ночь|ночи|ночью|утро|утра|утром|вечер|вечера|вечером|проснул|просыпа|поздно|рано|доброе утро|добрый день|добрый вечер|доброй ночи/.test(fullTextLower);
@@ -554,16 +554,17 @@ module.exports = async (req, res) => {
             linkInfo.text
         ].filter(Boolean).join('\n');
 
-const hasUserMedia = !!(incoming.media || (linkInfo.media && linkInfo.media.length));
+        // ── Аватарка: только когда человек сам ничего не прислал ИЛИ прямо попросил оценить его аву ──
+        const hasUserMedia = !!(incoming.media || (linkInfo.media && linkInfo.media.length));
         const senderId = (msg.from && msg.from.id) || null;
         let userAvatar = null;
-        // Аватарку подсовываем ТОЛЬКО когда человек сам ничего не прислал (знакомимся по фотке профиля)
-        // либо когда он прямо попросил оценить его аву. Иначе она станет «лишней картинкой» в чужом альбоме.
-        if (senderId && (asksProfile || (firstMeeting && !hasUserMedia))) {
+        if (senderId && (isExplicitProfileRequest || (shouldProfile && !hasUserMedia))) {
             userAvatar = await getUserAvatar(senderId);
         }
 
         const mediaParts = [incoming.media, ...linkInfo.media, userAvatar].filter(Boolean);
+        const hasMedia = mediaParts.length > 0;
+        const opts = { userLen: userText.length + incoming.docText.length + linkInfo.text.length, hasMedia, deadline };
 
         let reply;
         try {
@@ -578,7 +579,7 @@ const hasUserMedia = !!(incoming.media || (linkInfo.media && linkInfo.media.leng
 
         await sendMessage(chatId, reply);
 
-        // Записываем в память: сначала сообщение человека, потом ответ бота (новый memory API)
+        // Записываем в память: сначала сообщение человека, потом ответ бота
         const histUser = [who + spoken, incoming.histNote, linkInfo.note].filter(Boolean).join(' ') || who + '[вложение]';
         await memory.logIncoming(chatId, [{ r: 'u', t: histUser }], { type: isGroup ? 'group' : 'private', user: msg.from });
         await memory.logBot(chatId, [{ r: 'm', t: reply }]);
