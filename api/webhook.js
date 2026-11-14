@@ -501,6 +501,17 @@ module.exports = async (req, res) => {
             }
         }
 
+        // ── голая /dox без цели: переспрос в образе, без Gemini (по образцу меню курса) ──
+        if (/^\/(dox|докс|prazharka|прожарка)(?:@\w+)?$/i.test(userText.trim())) {
+            const hint = isGroup
+                ? 'Кого жарить, чудила? Пиши /dox @ник или имя прямо тут. Я подниму ТОЛЬКО то, что он наговорил в ЭТОЙ группе, а не весь интернет и не его анкету в соцсетях - мой идеальный компьютер читает логи этого чата, hēhē 🤭'
+                : 'В личке доксировать некого, позор нужен при публике. Иди в группу и пиши /dox @ник там. 🥱';
+            await sendMessage(chatId, hint);
+            await memory.logIncoming(chatId, [{ r: 'u', t: userText }], { type: isGroup ? 'group' : 'private', user: msg.from });
+            await memory.logBot(chatId, [{ r: 'm', t: hint }]);
+            return res.status(200).json({ status: 'dox_hint_sent' });
+        }
+
         if (/^\/start(@\w+)?(\s|$)/.test(userText)) {
             userText = 'Привет! (человек только что запустил бота - поздоровайся в образе)';
         }
