@@ -554,12 +554,15 @@ module.exports = async (req, res) => {
             linkInfo.text
         ].filter(Boolean).join('\n');
 
+        const hasUserMedia = !!(incoming.media || (linkInfo.media && linkInfo.media.length));
         let userAvatar = null;
-        if (mode !== 'distress' && shouldProfile && msg.from) {
-            userAvatar = await getUserAvatar(msg.from.id);
+        // Аватарку подсовываем ТОЛЬКО когда человек сам ничего не прислал (знакомимся по фотке профиля)
+        // либо когда он прямо попросил оценить его аву. Иначе она станет «лишней картинкой» в чужом альбоме.
+        if (from.id && (asksProfile || (firstMeeting && !hasUserMedia))) {
+            userAvatar = await getUserAvatar(from.id);
         }
 
-        const mediaParts = [incoming.media, userAvatar, ...linkInfo.media].filter(Boolean);
+        const mediaParts = [incoming.media, ...linkInfo.media, userAvatar].filter(Boolean);
         const hasMedia = mediaParts.length > 0;
         const opts = { userLen: userText.length + incoming.docText.length + linkInfo.text.length, hasMedia, deadline };
 
