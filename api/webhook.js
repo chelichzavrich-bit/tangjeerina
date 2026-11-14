@@ -49,6 +49,23 @@ function parseBody(req) {
 const displayName = (from) => (from && (from.first_name || from.username)) || 'Аноним';
 
 // ═══════════════════════════════════════════════════════════════
+// ПОСТ ГЛАВНОГО КАНАЛА, привязанного к группе (discussion group).
+// У такого поста нет msg.from - вместо него msg.sender_chat с type='channel'.
+// Именно поэтому старый код видел "Анонима" и молчал. Теперь: отвечает ВСЕГДА.
+// Анонимные посты админов (sender_chat.type='group'/'supergroup') сюда НЕ попадают -
+// они обрабатываются как обычные сообщения группы, без принудительного ответа.
+// ═══════════════════════════════════════════════════════════════
+function isChannelPost(msg) {
+    return !!(msg.sender_chat && msg.sender_chat.type === 'channel');
+}
+function authorLabel(msg) {
+    if (msg.sender_chat && (msg.sender_chat.title || msg.sender_chat.username)) {
+        return msg.sender_chat.title || ('@' + msg.sender_chat.username);
+    }
+    return displayName(msg.from);
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Функция времени для Танг (UTC-5)
 // ═══════════════════════════════════════════════════════════════
 function getTangTimeContext() {
@@ -381,6 +398,9 @@ module.exports = async (req, res) => {
     let mode = 'skip';
     if (isDistress) {
         mode = 'distress';
+    } else if (isChannelPost(msg)) {
+        // Пост главного канала, привязанного к группе: отвечает ВСЕГДА, минуя шанс и лимиты.
+        mode = 'direct';
     } else {
         const isAddressed = shouldAnswer(msg, botUsername);
         const isSpontaneous = shouldSpontaneouslyAnswer(msg, botUsername);
@@ -390,7 +410,7 @@ module.exports = async (req, res) => {
 
     if (mode === 'skip') {
         // Даже проигнорированное сообщение записываем в память — она должна видеть контекст чата
-        const who = (msg.chat.type === 'group' || msg.chat.type === 'supergroup') ? `[${displayName(msg.from)}]` : '';
+        const who = (msg.chat.type === 'group' || msg.chat.type === 'supergroup') ? `[${authorLabel(msg)}]` : '';
         const text = msg.text || msg.caption || '[вложение]';
         await memory.logIncoming(msg.chat.id, [{ r: 'u', t: who + ' ' + text }], { type: msg.chat.type === 'private' ? 'private' : 'group', user: msg.from });
         return res.status(200).json({ status: 'ignored (not addressed)' });
@@ -453,6 +473,11 @@ module.exports = async (req, res) => {
             contextBlocks.push(DISTRESS_RULES);
         } else {
             if (shouldTime) contextBlocks.push(getTangTimeContext());
+        }
+
+        // ── Пост канала: реагируем как участница, комментирующая публикацию, а не как собеседник с каналом ──
+        if (isChannelPost(msg) && mode !== 'distress') {
+            contextBlocks.push('[Это пост ГЛАВНОГО КАНАЛА, привязанного к группе. Отреагируй как участница чата, которая комментирует новость/публикацию канала: оцени содержание, зацепи деталь, поддень, пошути, при желании кинь свою ссылку-трофей. НЕ обращайся к каналу как к живому человеку, НЕ требуй у него ответа и НЕ веди диалог - это публикация. Ломаный русский и "мочь" обязательны.]');
         }
 
         // Инъекция рыночных данных
@@ -529,8 +554,10 @@ module.exports = async (req, res) => {
             }
         }
 
-        // ── ПОИСК В ИНТЕРНЕТЕ: по рельсам рынка, модель не вызывает инструменты, данные кладём в контекст ──
-        if (mode !== 'distress' && /найди|поищи|search|погугли|что в интернете|на ютубе|мем про|видео про|реддит|reddit|стать|новост/.test(fullTextLower)) {
+        // ═══════════════════════════════════════════════════════════════
+        // ПОИСК В ИНТЕРНЕТЕ (Reddit + YouTube + DuckDuckGo)
+        // ═══════════════════════════════════════════════════════════════
+        if (mode !== 'distress' && /найди|поищи|search|погугли|что в интернете|на ютубе|мем про|видео про|реддит|reddit|стать|новост|гугл|google/.test(fullTextLower)) {
             try {
                 const found = await searchInternet(userText || fullTextLower);
                 if (found.text) {
@@ -549,21 +576,21 @@ module.exports = async (req, res) => {
             contextBlocks.push(`[ОН ОТВЕЧАЕТ НА СООБЩЕНИЕ ОТ ${authorName}: "${repliedText.slice(0, 500)}"]. Прокомментируй содержание этого сообщения от лица Танг. Не отвечай автору напрямую, если текущий собеседник не просил об этом. Оцени суть сказанного в цитате.`);
         }
 
-        // Глубокий профилинг (только не в режиме distress)
-        if (mode !== 'distress' && shouldProfile) {
+        // Глубокий профилинг (только не в режиме distress и не для поста канала)
+        if (mode !== 'distress' && !isChannelPost(msg) && shouldProfile) {
             const userProfile = analyzeUserProfile(msg);
             if (userProfile && userProfile !== 'профиль пользователя не дает интересных зацепок') {
                 contextBlocks.push(`[ДОСЬЕ ПОЛЬЗОВАТЕЛЯ: ${userProfile}]. ВНИМАНИЕ: Это ПЕРВЫЙ контакт или прямая просьба. Используй это для язвительного комментария. В СЛЕДУЮЩИХ сообщениях КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО упоминать аватарку или ник, если тебя прямо не просят снова.]`);
             }
         }
 
-        const who = isGroup ? `[${displayName(msg.from)}]: ` : '';
+        const who = isGroup ? `[${authorLabel(msg)}]: ` : '';
         const spoken = userText || (incoming.hint || linkInfo.text ? '' : 'Привет');
 
         const textBlock = [
             contextPrefix,
             ...contextBlocks,
-            spoken ? who + spoken : (isGroup ? `[${displayName(msg.from)}] прислал вложение` : ''),
+            spoken ? who + spoken : (isGroup ? `[${authorLabel(msg)}] прислал вложение` : ''),
             incoming.hint,
             incoming.docText,
             linkInfo.text
@@ -594,7 +621,7 @@ module.exports = async (req, res) => {
 
         await sendMessage(chatId, reply);
 
-        // Записываем в память: сначала сообщение человека, потом ответ бота
+        // Записываем в память: сначала сообщение человека/канала, потом ответ бота
         const histUser = [who + spoken, incoming.histNote, linkInfo.note].filter(Boolean).join(' ') || who + '[вложение]';
         await memory.logIncoming(chatId, [{ r: 'u', t: histUser }], { type: isGroup ? 'group' : 'private', user: msg.from });
         await memory.logBot(chatId, [{ r: 'm', t: reply }]);
