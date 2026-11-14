@@ -10,6 +10,7 @@ const { handlePulseRequest } = require('../lib/pulse');
 const { getCryptoData, getPairData, PAIRS } = require('../lib/market');
 const ctx = require('../lib/context');
 const { DISTRESS_RULES } = require('../lib/prompts');
+const { searchInternet } = require('../lib/search');
 
 // ═══════════════════════════════════════════════════════════════
 // ЖЁСТКИЙ WATCHLIST
@@ -525,6 +526,20 @@ module.exports = async (req, res) => {
                 contextBlocks.push(`[СВЕЖИЕ ДАННЫЕ РЫНКА (${marketType}): ${marketData}]. ${instruction}`);
             } catch (e) {
                 console.error('Market data error:', e.message);
+            }
+        }
+
+        // ── ПОИСК В ИНТЕРНЕТЕ: по рельсам рынка, модель не вызывает инструменты, данные кладём в контекст ──
+        if (mode !== 'distress' && /найди|поищи|search|погугли|что в интернете|на ютубе|мем про|видео про|реддит|reddit|стать|новост/.test(fullTextLower)) {
+            try {
+                const found = await searchInternet(userText || fullTextLower);
+                if (found.text) {
+                    contextBlocks.push(`[НАЙДЕНО В ИНТЕРНЕТЕ (источники: ${found.sources.join(', ')}):\n${found.text}\n]. ИНСТРУКЦИЯ ДЛЯ ТАНГ: это твоя добыча, а не сервис. Выбери ОДНУ зацепку и кинь её в чат как трофей или оружие — насмешка, «я нашла, как тебя добить», «стащено из сети, теперь моё». Можешь вставить ссылку прямо в текст (Telegram сделает её кликабельной). ЗАПРЕЩЕНО: пересказывать список, писать «держите материал», отвечать как ассистент, советовать. Только через призму характера, ломаный русский и «мочь» обязательны. Если ничего толкового не нашла — злись на закрытые ворота в образе, не выдумывай содержимое.`);
+                } else {
+                    contextBlocks.push('[ПОИСК: интернет сегодня закрыл ворота, ни один источник не подвез. Танг злится на это в образе, НЕ выдумывает содержимое и НЕ извиняется как сервис.]');
+                }
+            } catch (e) {
+                console.error('Search error:', e.message);
             }
         }
 
