@@ -11,6 +11,7 @@ const { getCryptoData, getPairData, PAIRS } = require('../lib/market');
 const ctx = require('../lib/context');
 const { DISTRESS_RULES } = require('../lib/prompts');
 const { searchInternet } = require('../lib/search');
+const { handleCodesEarly } = require('../lib/codes'); // ◄── ДОБАВЛЕНО
 
 // ═══════════════════════════════════════════════════════════════
 // ЖЁСТКИЙ WATCHLIST
@@ -48,13 +49,6 @@ function parseBody(req) {
 
 const displayName = (from) => (from && (from.first_name || from.username)) || 'Аноним';
 
-// ═══════════════════════════════════════════════════════════════
-// ПОСТ ГЛАВНОГО КАНАЛА, привязанного к группе (discussion group).
-// У такого поста нет msg.from - вместо него msg.sender_chat с type='channel'.
-// Именно поэтому старый код видел "Анонима" и молчал. Теперь: отвечает ВСЕГДА.
-// Анонимные посты админов (sender_chat.type='group'/'supergroup') сюда НЕ попадают -
-// они обрабатываются как обычные сообщения группы, без принудительного ответа.
-// ═══════════════════════════════════════════════════════════════
 function isChannelPost(msg) {
     return !!(msg.sender_chat && msg.sender_chat.type === 'channel');
 }
@@ -65,9 +59,6 @@ function authorLabel(msg) {
     return displayName(msg.from);
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Функция времени для Танг (UTC-5)
-// ═══════════════════════════════════════════════════════════════
 function getTangTimeContext() {
     const now = new Date();
     const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
@@ -126,10 +117,6 @@ function parseMarketCommand(userText) {
     return { command, arg };
 }
 
-// ═══════════════════════════════════════════════════════════════
-// ДОКС: художественная прожарка по сообщениям ВНУТРИ группы.
-// Никаких реальных персональных данных - только разбор того, что человек написал в этом чате.
-// ═══════════════════════════════════════════════════════════════
 function parseDoxCommand(userText) {
     const m = /^\/(dox|докс|prazharka|прожарка)(?:@\w+)?\s+(.+)$/i.exec(String(userText || '').trim());
     if (!m) return null;
@@ -158,7 +145,7 @@ function collectDoxMessages(history, target, maxCount = 40, maxChars = 6000) {
     const out = [];
     let total = 0;
     for (const h of history || []) {
-        if (h.r !== 'u') continue; // только реплики людей, не её собственные
+        if (h.r !== 'u') continue;
         const t = String(h.t || '');
         const mm = /^\[([^\]]+)\]\s*:?\s*([\s\S]*)$/.exec(t);
         if (!mm) continue;
@@ -428,6 +415,15 @@ module.exports = async (req, res) => {
         return res.status(200).json({ status: 'callback_handled' });
     }
 
+    // ◄── ПЕРЕХВАТ КОМАНД ШИФРОВ ДО ОСНОВНОЙ ЛОГИКИ ◄──
+    const codesDeps = {
+        memory, telegram, sendMessage,
+        buildContents, generateReply
+    };
+    const handledByCodes = await handleCodesEarly(update, req, res, codesDeps);
+    if (handledByCodes) return; // codes уже отправили ответ и закрыли res
+    // ◄──────────────────────────────────────────────────────────
+
     const msg = update && update.message;
     if (!msg || !msg.chat) return res.status(200).json({ status: 'No message payload' });
     if (await memory.seenUpdate(update.update_id)) return res.status(200).json({ status: 'duplicate' });
@@ -438,7 +434,6 @@ module.exports = async (req, res) => {
     const replied = msg.reply_to_message;
     const repliedText = replied && (replied.text || replied.caption);
 
-    // ── Проверка беды ПЕРВОЙ: если сработала, отвечаем всегда, игнорируя кулдауны и лимиты ──
     const fullTextForCheck = ((msg.text || msg.caption || '') + ' ' + (repliedText || '')).toLowerCase();
     const isDistress = ctx.hasDistress(fullTextForCheck);
 
@@ -446,7 +441,6 @@ module.exports = async (req, res) => {
     if (isDistress) {
         mode = 'distress';
     } else if (isChannelPost(msg)) {
-        // Пост главного канала, привязанного к группе: отвечает ВСЕГДА, минуя шанс и лимиты.
         mode = 'direct';
     } else {
         const isAddressed = shouldAnswer(msg, botUsername);
@@ -456,7 +450,6 @@ module.exports = async (req, res) => {
     }
 
     if (mode === 'skip') {
-        // Даже проигнорированное сообщение записываем в память — она должна видеть контекст чата
         const who = (msg.chat.type === 'group' || msg.chat.type === 'supergroup') ? `[${authorLabel(msg)}]` : '';
         const text = msg.text || msg.caption || '[вложение]';
         await memory.logIncoming(msg.chat.id, [{ r: 'u', t: who + ' ' + text }], { type: msg.chat.type === 'private' ? 'private' : 'group', user: msg.from, sender_chat: msg.sender_chat });
@@ -501,7 +494,6 @@ module.exports = async (req, res) => {
             }
         }
 
-        // ── голая /dox без цели: переспрос в образе, без Gemini (по образцу меню курса) ──
         if (/^\/(dox|докс|prazharka|прожарка)(?:@\w+)?$/i.test(userText.trim())) {
             const hint = isGroup
                 ? 'Кого жарить, чудила? Пиши /dox @ник или имя прямо тут. Я подниму ТОЛЬКО то, что он наговорил в ЭТОЙ группе, а не весь интернет и не его анкету в соцсетях - мой идеальный компьютер читает логи этого чата, hēhē 🤭'
@@ -518,7 +510,6 @@ module.exports = async (req, res) => {
 
         const history = await memory.getHistory(chatId);
 
-        // Защита от дубликатов: если последнее сообщение в истории от этого же пользователя и прошло меньше 3 секунд, пропускаем
         const lastMsg = history[history.length - 1];
         const currentUid = (msg.from && msg.from.id) ? msg.from.id : (msg.sender_chat ? msg.sender_chat.id : null);
         if (lastMsg && lastMsg.r === 'u' && lastMsg.uid && currentUid && lastMsg.uid === currentUid) {
@@ -536,19 +527,16 @@ module.exports = async (req, res) => {
 
         let contextBlocks = [];
 
-        // ── Режим "грубая забота" перекрывает всё: время и профиль не добавляем, только DISTRESS_RULES ──
         if (mode === 'distress') {
             contextBlocks.push(DISTRESS_RULES);
         } else {
             if (shouldTime) contextBlocks.push(getTangTimeContext());
         }
 
-        // ── Пост канала: реагируем как участница, комментирующая публикацию, а не как собеседник с каналом ──
         if (isChannelPost(msg) && mode !== 'distress') {
             contextBlocks.push('[Это пост ГЛАВНОГО КАНАЛА, привязанного к группе. Отреагируй как участница чата, которая комментирует новость/публикацию канала: оцени содержание, зацепи деталь, поддень, пошути, при желании кинь свою ссылку-трофей. НЕ обращайся к каналу как к живому человеку, НЕ требуй у него ответа и НЕ веди диалог - это публикация. Ломаный русский и "мочь" обязательны.]');
         }
 
-        // Инъекция рыночных данных
         if (marketCmd && marketCmd.arg) {
             try {
                 let marketData = '';
@@ -622,9 +610,6 @@ module.exports = async (req, res) => {
             }
         }
 
-        // ═══════════════════════════════════════════════════════════════
-        // ПОИСК В ИНТЕРНЕТЕ (Reddit + YouTube + DuckDuckGo)
-        // ═══════════════════════════════════════════════════════════════
         if (mode !== 'distress' && /найди|поищи|search|погугли|что в интернете|на ютубе|мем про|видео про|реддит|reddit|стать|новост|гугл|google/.test(fullTextLower)) {
             try {
                 const found = await searchInternet(userText || fullTextLower);
@@ -638,9 +623,6 @@ module.exports = async (req, res) => {
             }
         }
 
-        // ═══════════════════════════════════════════════════════════════
-        // ДОКС (прожарка по дампу этой группы, без реальных данных)
-        // ═══════════════════════════════════════════════════════════════
         if (doxCmd) {
             if (!isGroup) {
                 contextBlocks.push('[ДОКС: это публичный позор, в личке доксировать некого. Отрепетируй в образе, что для докса нужна толпа и общий чат, а не приват. Ломаный русский, «мочь».]');
@@ -677,7 +659,6 @@ ${dossier}
             contextBlocks.push(`[ОН ОТВЕЧАЕТ НА СООБЩЕНИЕ ОТ ${authorName}: "${repliedText.slice(0, 500)}"]. Прокомментируй содержание этого сообщения от лица Танг. Не отвечай автору напрямую, если текущий собеседник не просил об этом. Оцени суть сказанного в цитате.`);
         }
 
-        // Глубокий профилинг (только не в режиме distress и не для поста канала)
         if (mode !== 'distress' && !isChannelPost(msg) && !doxCmd && shouldProfile) {
             const userProfile = analyzeUserProfile(msg);
             if (userProfile && userProfile !== 'профиль пользователя не дает интересных зацепок') {
@@ -697,7 +678,6 @@ ${dossier}
             linkInfo.text
         ].filter(Boolean).join('\n');
 
-        // ── Аватарка: только когда человек сам ничего не прислал ИЛИ прямо попросил оценить его аву ──
         const hasUserMedia = !!(incoming.media || (linkInfo.media && linkInfo.media.length));
         const senderId = (msg.from && msg.from.id) || null;
         let userAvatar = null;
@@ -722,7 +702,6 @@ ${dossier}
 
         await sendMessage(chatId, reply);
 
-        // Записываем в память: сначала сообщение человека/канала, потом ответ бота
         const histUser = [who + spoken, incoming.histNote, linkInfo.note].filter(Boolean).join(' ') || who + '[вложение]';
         await memory.logIncoming(chatId, [{ r: 'u', t: histUser }], { type: isGroup ? 'group' : 'private', user: msg.from, sender_chat: msg.sender_chat });
         await memory.logBot(chatId, [{ r: 'm', t: reply }]);
@@ -730,7 +709,6 @@ ${dossier}
         return res.status(200).json({ status: 'success' });
     } catch (error) {
         console.error('Webhook processing error:', error);
-        // На беду отвечаем даже при сбое Gemini — не даём человеку остаться в пустоте
         try { await sendMessage(chatId, randomFallback()); } catch (_) { /* ignore */ }
         return res.status(200).json({ status: 'error_handled', message: error.message });
     }
