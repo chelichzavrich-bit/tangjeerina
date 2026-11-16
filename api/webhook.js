@@ -8,10 +8,10 @@ const { generateReply, buildContents } = require('../lib/ai');
 const { randomFallback } = require('../lib/fallbacks');
 const { handlePulseRequest } = require('../lib/pulse');
 const { getCryptoData, getPairData, PAIRS } = require('../lib/market');
+const { handleCodesEarly } = require('../lib/codes');
 const ctx = require('../lib/context');
 const { DISTRESS_RULES } = require('../lib/prompts');
 const { searchInternet } = require('../lib/search');
-const { handleCodesEarly } = require('../lib/codes'); // ◄── ДОБАВЛЕНО
 
 // ═══════════════════════════════════════════════════════════════
 // ЖЁСТКИЙ WATCHLIST
@@ -27,7 +27,7 @@ const WATCHLIST = [
     'чингчонг', 'крольчиха',
     'пингвин', 'пингвинья империя',
     'ли чуцао', 'танг ченг', 'ли мун',
-    'марозол', 'мияконе', 'снорк', 'мороженщица',
+    'мияконе', 'снорк', 'мороженщица',
     'дядя санта', 'товарищ мороз', 'снегурочка',
     'император форстер'
 ];
@@ -415,14 +415,16 @@ module.exports = async (req, res) => {
         return res.status(200).json({ status: 'callback_handled' });
     }
 
-    // ◄── ПЕРЕХВАТ КОМАНД ШИФРОВ ДО ОСНОВНОЙ ЛОГИКИ ◄──
-    const codesDeps = {
-        memory, telegram, sendMessage,
-        buildContents, generateReply
+    // ── ВАЖНО: перехватываем команды кодов ДО основного flow ──
+    const codeDeps = {
+        memory,
+        telegram,
+        sendMessage,
+        buildContents,
+        generateReply
     };
-    const handledByCodes = await handleCodesEarly(update, req, res, codesDeps);
-    if (handledByCodes) return; // codes уже отправили ответ и закрыли res
-    // ◄──────────────────────────────────────────────────────────
+    const codesHandled = await handleCodesEarly(update, req, res, codeDeps);
+    if (codesHandled) return;
 
     const msg = update && update.message;
     if (!msg || !msg.chat) return res.status(200).json({ status: 'No message payload' });
@@ -497,7 +499,7 @@ module.exports = async (req, res) => {
         if (/^\/(dox|докс|prazharka|прожарка)(?:@\w+)?$/i.test(userText.trim())) {
             const hint = isGroup
                 ? 'Кого жарить, чудила? Пиши /dox @ник или имя прямо тут. Я подниму ТОЛЬКО то, что он наговорил в ЭТОЙ группе, а не весь интернет и не его анкету в соцсетях - мой идеальный компьютер читает логи этого чата, hēhē 🤭'
-                : 'В личке доксировать некого, позор нужен при публике. Иди в группу и пиши /dox @ник там. 🥱';
+                : 'В личке доксировать некого, позор нужен при публике. Иди в группу и пиши /dox @ник там. 🫣';
             await sendMessage(chatId, hint);
             await memory.logIncoming(chatId, [{ r: 'u', t: userText }], { type: isGroup ? 'group' : 'private', user: msg.from, sender_chat: msg.sender_chat });
             await memory.logBot(chatId, [{ r: 'm', t: hint }]);
@@ -505,7 +507,7 @@ module.exports = async (req, res) => {
         }
 
         if (/^\/start(@\w+)?(\s|$)/.test(userText)) {
-            userText = 'Привет! (человек только что запустил бота - поздоровайся в образе)';
+            userText = 'Привет! (человек только что запустил бота - поздоровайся в образе, представься коротко, НЕ упоминай Марозола, Жак или других персонажей - просто скажи что-то вроде "Эхей, кто тут у нас, новый лошок? Моя звать Танджи, я мочь помочь тебе расстаться с деньгами ☺️")';
         }
 
         const history = await memory.getHistory(chatId);
