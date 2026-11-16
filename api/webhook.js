@@ -11,7 +11,6 @@ const { getCryptoData, getPairData, PAIRS } = require('../lib/market');
 const ctx = require('../lib/context');
 const { DISTRESS_RULES } = require('../lib/prompts');
 const { searchInternet } = require('../lib/search');
-const { handleCodesEarly, detectBlock } = require('../lib/codes');
 
 // ═══════════════════════════════════════════════════════════════
 // ЖЁСТКИЙ WATCHLIST
@@ -420,9 +419,6 @@ module.exports = async (req, res) => {
 
     const update = parseBody(req);
 
-    // ── ШИФРЫ: команда /code, кнопки и режим ожидания перехватываются здесь ──
-    if (await handleCodesEarly(update, req, res, { memory, sendMessage, telegram, generateReply, buildContents })) return;
-
     if (update && update.callback_query) {
         try {
             await handleCallbackQuery(update.callback_query);
@@ -463,7 +459,7 @@ module.exports = async (req, res) => {
         // Даже проигнорированное сообщение записываем в память — она должна видеть контекст чата
         const who = (msg.chat.type === 'group' || msg.chat.type === 'supergroup') ? `[${authorLabel(msg)}]` : '';
         const text = msg.text || msg.caption || '[вложение]';
-        await memory.logIncoming(msg.chat.id, [{ r: 'u', t: who + ' ' + text }], { type: msg.chat.type === 'private' ? 'private' : 'group', user: msg.from });
+        await memory.logIncoming(msg.chat.id, [{ r: 'u', t: who + ' ' + text }], { type: msg.chat.type === 'private' ? 'private' : 'group', user: msg.from, sender_chat: msg.sender_chat });
         return res.status(200).json({ status: 'ignored (not addressed)' });
     }
 
@@ -495,12 +491,12 @@ module.exports = async (req, res) => {
         if (marketCmd && !marketCmd.arg) {
             if (marketCmd.command === 'kurs') {
                 await sendKursMenu(chatId);
-                await memory.logIncoming(chatId, [{ r: 'u', t: userText || '/kurs' }], { type: isGroup ? 'group' : 'private', user: msg.from });
+                await memory.logIncoming(chatId, [{ r: 'u', t: userText || '/kurs' }], { type: isGroup ? 'group' : 'private', user: msg.from, sender_chat: msg.sender_chat });
                 return res.status(200).json({ status: 'kurs_menu_sent' });
             }
             if (marketCmd.command === 'crypto') {
                 await sendCryptoMenu(chatId);
-                await memory.logIncoming(chatId, [{ r: 'u', t: userText || '/crypto' }], { type: isGroup ? 'group' : 'private', user: msg.from });
+                await memory.logIncoming(chatId, [{ r: 'u', t: userText || '/crypto' }], { type: isGroup ? 'group' : 'private', user: msg.from, sender_chat: msg.sender_chat });
                 return res.status(200).json({ status: 'crypto_menu_sent' });
             }
         }
@@ -511,7 +507,7 @@ module.exports = async (req, res) => {
                 ? 'Кого жарить, чудила? Пиши /dox @ник или имя прямо тут. Я подниму ТОЛЬКО то, что он наговорил в ЭТОЙ группе, а не весь интернет и не его анкету в соцсетях - мой идеальный компьютер читает логи этого чата, hēhē 🤭'
                 : 'В личке доксировать некого, позор нужен при публике. Иди в группу и пиши /dox @ник там. 🥱';
             await sendMessage(chatId, hint);
-            await memory.logIncoming(chatId, [{ r: 'u', t: userText }], { type: isGroup ? 'group' : 'private', user: msg.from });
+            await memory.logIncoming(chatId, [{ r: 'u', t: userText }], { type: isGroup ? 'group' : 'private', user: msg.from, sender_chat: msg.sender_chat });
             await memory.logBot(chatId, [{ r: 'm', t: hint }]);
             return res.status(200).json({ status: 'dox_hint_sent' });
         }
@@ -521,6 +517,15 @@ module.exports = async (req, res) => {
         }
 
         const history = await memory.getHistory(chatId);
+
+        // Защита от дубликатов: если последнее сообщение в истории от этого же пользователя и прошло меньше 3 секунд, пропускаем
+        const lastMsg = history[history.length - 1];
+        const currentUid = (msg.from && msg.from.id) ? msg.from.id : (msg.sender_chat ? msg.sender_chat.id : null);
+        if (lastMsg && lastMsg.r === 'u' && lastMsg.uid && currentUid && lastMsg.uid === currentUid) {
+            if (Date.now() - (lastMsg.ts || 0) < 3000) {
+                return res.status(200).json({ status: 'duplicate_recent' });
+            }
+        }
 
         const fullTextLower = (userText + ' ' + (repliedText || '')).toLowerCase();
         const isExplicitProfileRequest = /оцени|внешность|мой ник|мой юзернейм|аватарк|как я выгляжу|кто я так|разгляди|фотк/.test(fullTextLower);
@@ -666,12 +671,6 @@ ${dossier}
             }
         }
 
-        // ── Она сама вскрывает присланный код, даже без команды ──
-        if (mode !== 'distress') {
-            const codeBlock = detectBlock(userText);
-            if (codeBlock) contextBlocks.push(codeBlock);
-        }
-
         if (repliedText) {
             const repliedFrom = replied.from;
             const authorName = repliedFrom ? (repliedFrom.first_name || repliedFrom.username || 'Неизвестный') : 'Неизвестный';
@@ -725,7 +724,7 @@ ${dossier}
 
         // Записываем в память: сначала сообщение человека/канала, потом ответ бота
         const histUser = [who + spoken, incoming.histNote, linkInfo.note].filter(Boolean).join(' ') || who + '[вложение]';
-        await memory.logIncoming(chatId, [{ r: 'u', t: histUser }], { type: isGroup ? 'group' : 'private', user: msg.from });
+        await memory.logIncoming(chatId, [{ r: 'u', t: histUser }], { type: isGroup ? 'group' : 'private', user: msg.from, sender_chat: msg.sender_chat });
         await memory.logBot(chatId, [{ r: 'm', t: reply }]);
 
         return res.status(200).json({ status: 'success' });
