@@ -11,6 +11,7 @@ const { getCryptoData, getPairData, PAIRS } = require('../lib/market');
 const ctx = require('../lib/context');
 const { DISTRESS_RULES } = require('../lib/prompts');
 const { searchInternet } = require('../lib/search');
+const { handleCodesEarly, detectBlock } = require('../lib/codes');
 
 // ═══════════════════════════════════════════════════════════════
 // ЖЁСТКИЙ WATCHLIST
@@ -419,6 +420,9 @@ module.exports = async (req, res) => {
 
     const update = parseBody(req);
 
+    // ── ШИФРЫ: команда /code, кнопки и режим ожидания перехватываются здесь ──
+    if (await handleCodesEarly(update, req, res, { memory, sendMessage, telegram, generateReply, buildContents })) return;
+
     if (update && update.callback_query) {
         try {
             await handleCallbackQuery(update.callback_query);
@@ -660,6 +664,12 @@ ${dossier}
                     }
                 }
             }
+        }
+
+        // ── Она сама вскрывает присланный код, даже без команды ──
+        if (mode !== 'distress') {
+            const codeBlock = detectBlock(userText);
+            if (codeBlock) contextBlocks.push(codeBlock);
         }
 
         if (repliedText) {
