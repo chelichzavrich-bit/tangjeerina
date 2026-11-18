@@ -125,7 +125,7 @@ async function codeGenerateQuip(chatId, user, r) {
     
     if (reactionType === 'mock') return '[ВЫДАТЬ]\nОпять этот палочник лезть в мой код? С него двойной тариф за моральный ущерб 🤬';
     if (reactionType === 'defend') return '[ОТКАЗ]\nЭтот чешуйчатый опять совать свой нос? Не выдам, иди плакать в свою пещеру 😠';
-    if (reactionType === 'sentimental') return '[ВЫДАТЬ]\nФу, какая сентиментальность. С тебя额外 плата за работу с эмоциями 🤭';
+    if (reactionType === 'sentimental') return '[ВЫДАТЬ]\nФу, какая сентиментальность. С тебя дополнительная плата за работу с эмоциями 🤭';
     if (reactionType === 'greedy') return '[ВЫДАТЬ]\nОоо, финансовый контент! С тебя процент от суммы, которую ты прятать ☺️';
     if (reactionType === 'proud') return '[ВЫДАТЬ]\nПравильно, что вспомнил имя великой. С тебя двадцатка за уважение ☺️';
     
@@ -650,11 +650,13 @@ module.exports = async (req, res) => {
         ]);
 
         let userText = incoming.userText;
-        if (botUsername) userText = userText.replace(new RegExp('@' + botUsername + '\\b', 'gi'), '').trim();
+        
         // Если прислали только голос или кружок без текстовой подписи
         if ((msg.voice || msg.video_note) && !userText) {
             userText = '[отправил ' + (msg.voice ? 'голосовое' : 'кружок') + ']';
         }
+        
+        if (botUsername) userText = userText.replace(new RegExp('@' + botUsername + '\\b', 'gi'), '').trim();
 
         const marketCmd = parseMarketCommand(userText);
         const doxCmd = parseDoxCommand(userText);
@@ -859,12 +861,14 @@ module.exports = async (req, res) => {
         if (conflict.conflict && mode !== 'distress') {
             contextBlocks.push('[КОНФЛИКТ В ЧАТЕ: пользователи ' + conflict.users.join(' и ') + ' ругаются. Танг провоцирует их на дальнейший конфликт или шуточно шипперит как "старую парочку". Вмешивается с издёвкой, подначивает, но не принимает ничью сторону. Ломаный русский, «мочь».]');
         }
-// ── РЕАКЦИЯ НА ГОЛОСОВЫЕ И КРУЖОЧКИ (динамическая генерация) ──
+
+        // ── РЕАКЦИЯ НА ГОЛОСОВЫЕ И КРУЖОЧКИ (динамическая генерация) ──
         if (msg.voice || msg.video_note) {
             const duration = msg.voice ? msg.voice.duration : msg.video_note.duration;
             const type = msg.voice ? 'ГОЛОСОВОЕ СООБЩЕНИЕ' : 'КРУЖОЧЕК (видеосообщение)';
             contextBlocks.push(`[${type} длительностью ${duration} секунд. Ты не слушаешь аудио и не смотришь видео, это ниже твоего достоинства и тратит твою оперативку. Придумай УНИКАЛЬНУЮ реакцию в образе: поиздевайся над длиной (${duration} сек), потребуй текстовую расшифровку под угрозой игнора, скажи что голос звучит как скрежет или лицо в кружочке пугает. НЕ используй готовые шаблоны, выдумай новую насмешку. Ломаный русский, «мочь» использовать естественно, не спамить фразой «идеальный компьютер», один смайлик в конце.]`);
         }
+
         if (repliedText) {
             const repliedFrom = replied.from;
             const authorName = repliedFrom ? (repliedFrom.first_name || repliedFrom.username || 'Неизвестный') : 'Неизвестный';
