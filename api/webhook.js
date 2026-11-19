@@ -921,7 +921,29 @@ ${dossier}
             reply = (await generateReply(buildContents(history, parts), { ...opts, hasMedia: false })).text;
         }
 
-        await sendMessage(chatId, reply);
+        // Обработка реакций и стикеров
+        const reactionMatch = reply.match(/^\[REACTION:([👍👎❤️🔥🎉💩👀👏😱🤔🤩😢🤡❓⭐📌💯]+)\]/);
+        const stickerMatch = reply.match(/^\[STICKER:([^\]]+)\]/);
+        
+        if (reactionMatch) {
+            const emoji = reactionMatch[1];
+            const messageId = msg.message_id;
+            await setReaction(chatId, messageId, emoji);
+            const reactionText = reply.replace(reactionMatch[0], '').trim();
+            if (reactionText) {
+                await sendMessage(chatId, reactionText);
+            }
+        } else if (stickerMatch) {
+            const stickerKey = stickerMatch[1];
+            const stickerFileId = await memory.getSticker(chatId, stickerKey);
+            if (stickerFileId) {
+                await sendSticker(chatId, stickerFileId);
+            } else {
+                await sendMessage(chatId, reply.replace(stickerMatch[0], '').trim());
+            }
+        } else {
+            await sendMessage(chatId, reply);
+        }
 
         const histUser = [who + spoken, incoming.histNote, linkInfo.note].filter(Boolean).join(' ') || who + '[вложение]';
         await memory.logIncoming(chatId, [{ r: 'u', t: histUser }], { type: isGroup ? 'group' : 'private', user: msg.from });
