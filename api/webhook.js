@@ -648,6 +648,11 @@ module.exports = async (req, res) => {
             readIncoming(msg),
             readLinks(msg, c)
         ]);
+        // Сохраняем стикеры от пользователей
+        if (msg.sticker && msg.sticker.file_id) {
+            const emoji = msg.sticker.emoji || 'custom';
+            await memory.saveSticker(chatId, emoji, msg.sticker.file_id);
+        }
 
         let userText = incoming.userText;
         
