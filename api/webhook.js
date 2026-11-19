@@ -1,7 +1,7 @@
 // Telegram webhook: Танг Джи Рина (Vercel + Google Gemini + Groq fallback).
 const { cfg } = require('../lib/config');
 const memory = require('../lib/memory');
-const { telegram, sendMessage } = require('../lib/telegram');
+const { telegram, sendMessage, setReaction, sendSticker } = require('../lib/telegram');
 const { readIncoming } = require('../lib/files');
 const { extractUrls, parseLinks, describeLinks, getTgProfile } = require('../lib/links');
 const { generateReply, buildContents } = require('../lib/ai');
