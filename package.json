@@ -1,11 +1,11 @@
 {
   "name": "tangjeerina",
-  "version": "4.0.0",
-  "description": "Telegram bot (Tang Jee Rina) on Vercel with Google Gemini",
+  "version": "5.0.0",
+  "description": "Telegram bot (Tang Jee Rina) on Vercel with Google Gemini + Groq fallback",
   "main": "api/webhook.js",
   "private": true,
   "scripts": {
-    "check": "node --check api/webhook.js && node --check api/pulse.js && node --check lib/ai.js && node --check lib/config.js && node --check lib/context.js && node --check lib/fallbacks.js && node --check lib/files.js && node --check lib/links.js && node --check lib/market.js && node --check lib/memory.js && node --check lib/persona.js && node --check lib/prompts.js && node --check lib/pulse.js && node --check lib/telegram.js"
+    "check": "node --check api/webhook.js && node --check api/pulse.js && node --check lib/ai.js && node --check lib/codes.js && node --check lib/config.js && node --check lib/context.js && node --check lib/fallbacks.js && node --check lib/files.js && node --check lib/links.js && node --check lib/market.js && node --check lib/memory.js && node --check lib/persona.js && node --check lib/prompts.js && node --check lib/pulse.js && node --check lib/search.js && node --check lib/telegram.js"
   },
   "dependencies": {
     "mammoth": "^1.8.0"
