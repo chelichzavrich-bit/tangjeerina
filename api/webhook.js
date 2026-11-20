@@ -8,6 +8,7 @@ const links = require('../lib/links');
 const codes = require('../lib/codes');
 const market = require('../lib/market');
 const ctx = require('../lib/context');
+const cal = require('../lib/calendar');
 const { generateReply, buildContents } = require('../lib/ai');
 const { randomFallback } = require('../lib/fallbacks');
 const { searchInternet } = require('../lib/search');
@@ -19,6 +20,7 @@ const RE_MONEY = /доллар|евро|рубл|юан|биткоин|\bbtc\b|\
 const RE_DOX = /^(dox|докс|prazharka|прожарка)$/i;
 const RE_KURS = /^(kurs|курс|kursy)$/i;
 const RE_CRYPTO = /^(crypto|крипта)$/i;
+const RE_BDAY = /^(bday|birthday|др|деньрождения|праздники|dates)$/i;
 
 const DISTRESS_FALLBACK = 'Эй. Не делать глупость, слышать? Идти к живой человек рядом - мать, друг, кто угодно, и сказать вслух, что тебе плохо. Если совсем край - звонить в служба помощь, там мочь вытащить. Я тебе не мамка, но я это слушать не хотеть.';
 
@@ -45,7 +47,7 @@ function commandOf(text, bot) {
   const m = /^\/([A-Za-z0-9_]+)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/.exec(String(text || '').trim());
   if (!m) return null;
   const target = (m[2] || '').toLowerCase();
-  if (target && bot && target !== bot) return null; // команда чужому боту
+  if (target && bot && target !== bot) return null;
   return { name: m[1].toLowerCase(), arg: (m[3] || '').trim(), target };
 }
 
@@ -65,7 +67,6 @@ function decide(msg, { isGroup, channel, bot, meta, c, rawText }) {
   const mentioned = !!bot && full.includes('@' + bot);
   const addressed = !isGroup || channel || !!cmd || mentioned || replyToBot(msg, bot) || ctx.hasName(full);
 
-  // Реальная беда: в личке и в прямом обращении - грубая забота. Сама в чужую боль не вклинивается.
   if (ctx.hasDistress(full)) {
     return addressed
       ? { mode: 'distress', reason: 'distress', prefix: '' }
@@ -82,6 +83,9 @@ function decide(msg, { isGroup, channel, bot, meta, c, rawText }) {
   if (replyToBot(msg, bot)) return { mode: 'direct', reason: 'reply', prefix: '' };
   if (ctx.hasName(full)) return { mode: 'direct', reason: 'name', prefix: '' };
 
+  // В тяжёлые лорные дни сама почти не вклинивается, 27 августа - молчит.
+  if (!cal.spontAllowed()) return { mode: 'skip', reason: 'calendar-silent' };
+
   let p = 0;
   let why = '';
   if (msg.new_chat_members && msg.new_chat_members.length) { p = c.reactJoin; why = 'join'; }
@@ -94,7 +98,7 @@ function decide(msg, { isGroup, channel, bot, meta, c, rawText }) {
   if (p <= 0) return { mode: 'skip', reason: 'no-trigger' };
 
   if (Date.now() - (meta.lastBotAt || 0) < c.cooldownSec * 1000) return { mode: 'skip', reason: 'cooldown' };
-  const chance = Math.min(0.95, p * ctx.moodFactor());
+  const chance = Math.min(0.95, p * cal.moodFactor());
   if (Math.random() >= chance) return { mode: 'skip', reason: 'chance' };
 
   return {
@@ -113,8 +117,7 @@ function detectConflict(history) {
     const mm = /^\[([^\]]+)\]/.exec(String(h.t || ''));
     const key = String(h.uid || (mm ? mm[1] : '') || '').trim();
     if (!key) continue;
-    const label = h.n || (mm ? mm[1] : key);
-    byUser.set(key, label);
+    byUser.set(key, h.n || (mm ? mm[1] : key));
   }
   return byUser.size >= 2 ? [...byUser.values()].slice(0, 3) : null;
 }
@@ -160,7 +163,7 @@ async function readLinks(msg, c, deadline) {
 }
 
 // ───────────── прожарка ─────────────
-async function buildDox(msg, arg, roster, history, mediaParts, c) {
+async function buildDox(msg, arg, roster, history, mediaParts) {
   const chatId = msg.chat.id;
   const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
   const reqName = (msg.from && msg.from.first_name) || 'заказчица';
@@ -181,7 +184,7 @@ async function buildDox(msg, arg, roster, history, mediaParts, c) {
         'Описание: ' + (profile.bio || 'пусто, как его голова'),
         profile.extra ? 'Статистика: ' + profile.extra : '',
         profile.avatar ? 'Его аватарка приложена к сообщению - ты её видишь.' : 'Аватарки нет.',
-        'ВЕРДИКТ: разнеси ник, описание и внешность. Он думал, что спрятался, но твой острый нюх найти его даже в пустой комнате. Пингани ' + reqHandle + '. Ломаный русский, «мочь», один смайлик в конце.]'
+        'ВЕРДИКТ: разнеси ник, описание и внешность. Он думал, что спрятался, но я найти его даже в пустой комнате. Пингани ' + reqHandle + '. Ломаный русский, «мочь», один смайлик в конце.]'
       ].filter(Boolean).join('\n');
     }
     return '[ДОКС ЗАПРОС: ' + reqHandle + ' просит прожарить «' + arg + '», но такого нет ни в чате, ни в открытом Telegram. Вердикт в образе: она искать призрак, либо ник кривой, либо лох даже не заслужил прожарку. Пингани ' + reqHandle + '. Ломаный русский, «мочь».]';
@@ -243,11 +246,12 @@ async function handleCallback(cq, deadline) {
   let text;
   try {
     const history = await memory.getHistory(chatId);
-    const block = '[СВЕЖИЕ ДАННЫЕ РЫНКА (' + payload.type + '): ' + payload.data + ']. ' + MARKET_RULES;
-    text = (await generateReply(buildContents(history, [{ text: block }]), { userLen: 120, deadline })).text;
+    const blockText = [cal.loreContext(), cal.block(), '[СВЕЖИЕ ДАННЫЕ РЫНКА (' + payload.type + '): ' + payload.data + ']. ' + MARKET_RULES].filter(Boolean).join('\n');
+    text = (await generateReply(buildContents(history, [{ text: blockText }]), { userLen: 120, deadline })).text;
+    text = cal.limitReply(text);
   } catch (e) {
     console.error('market callback:', e.message);
-    text = randomFallback();
+    text = cal.limitReply(randomFallback());
   }
   await tg.sendMessage(chatId, text);
   const who = cq.from || {};
@@ -263,6 +267,7 @@ async function deliver(msg, reply, opts) {
   const threadId = msg.message_thread_id;
   const replyTo = opts.isGroup && c.replyInGroup ? msg.message_id : undefined;
   let onlySignal = false;
+  const playful = cal.gamesAllowed();
 
   const react = /^\[REACTION:([^\]]+)\]/i.exec(text);
   if (react) {
@@ -274,15 +279,16 @@ async function deliver(msg, reply, opts) {
   if (stick) {
     text = text.slice(stick[0].length).trim();
     onlySignal = true;
-    if (c.stickersEnabled && opts.mode !== 'distress') {
+    if (c.stickersEnabled && opts.mode !== 'distress' && playful) {
       const s = await memory.getSticker(chatId, stick[1]);
       if (s) {
         try { await tg.sendSticker(chatId, s.fileId, { threadId, replyTo }); } catch (e) { console.error('sendSticker:', e.message); }
       }
     }
   }
-  if (!text && onlySignal && opts.mode !== 'distress') return String(reply).trim();
+  if (!text && onlySignal && opts.mode !== 'distress' && playful) return String(reply).trim();
   if (!text) text = opts.mode === 'distress' ? DISTRESS_FALLBACK : randomFallback();
+  if (opts.mode !== 'distress') text = cal.limitReply(text);
   await tg.sendMessage(chatId, text, { threadId, replyTo });
   return text;
 }
@@ -298,7 +304,6 @@ async function handleMessage(msg, update, bot, deadline) {
   const user = msg.from || null;
   const who = (isGroup || channel) ? '[' + authorLabel(msg) + ']: ' : '';
 
-  // Стикеры воруются всегда, даже когда она молчит.
   if (c.stickersEnabled && msg.sticker && msg.sticker.file_id) {
     await memory.saveSticker(chatId, { emoji: msg.sticker.emoji || '🙂', fileId: msg.sticker.file_id, user });
   }
@@ -327,10 +332,16 @@ async function handleMessage(msg, update, bot, deadline) {
   }
 
   tg.sendChatAction(chatId, 'typing');
-
   const cmd = commandOf(rawText, bot);
 
-  // Мгновенные ответы: меню и подсказки
+  // Мгновенные ответы без модели
+  if (cmd && RE_BDAY.test(cmd.name)) {
+    const text = cal.publicDates();
+    await tg.sendMessage(chatId, text, isGroup ? { replyTo: msg.message_id } : {});
+    await logUser(rawText);
+    await memory.logBot(chatId, [{ r: 'm', t: text }]);
+    return { status: 'bday' };
+  }
   if (cmd && RE_KURS.test(cmd.name) && !cmd.arg) {
     await tg.telegram('sendMessage', { chat_id: chatId, text: 'Ну цто, чудила, какой фантик ты хотеть пощупать? Выбирать пара, пока я добрая ☺️', reply_markup: { inline_keyboard: market.kursKeyboard() } });
     await logUser(rawText);
@@ -343,7 +354,7 @@ async function handleMessage(msg, update, bot, deadline) {
   }
   if (cmd && RE_DOX.test(cmd.name) && !cmd.arg) {
     const hint = isGroup
-      ? 'Кого жарить, чудила? Пиши /dox @ник прямо тут. Я подниму ТОЛЬКО то, что он наговорил в ЭТОЙ группе. остальное оставить себе,hēhē 🤭'
+      ? 'Кого жарить, чудила? Пиши /dox @ник прямо тут. Я подниму ТОЛЬКО то, что он наговорил в ЭТОЙ группе - я читать логи этого чата, hēhē 🤭'
       : 'В личке доксировать некого, позор нужен при публике. Идти в группу и писать /dox @ник там 🫣';
     await tg.sendMessage(chatId, hint);
     await logUser(rawText);
@@ -351,7 +362,6 @@ async function handleMessage(msg, update, bot, deadline) {
     return { status: 'dox_hint' };
   }
 
-  // Параллельно: вложение, ссылки, история, ростер, стикеры
   const [incoming, linkInfo, history, roster, stickers] = await Promise.all([
     readIncoming(msg, { mockAV: c.avMock }),
     (c.linksEnabled && deadline - Date.now() > 9000) ? readLinks(msg, c, deadline) : Promise.resolve({ text: '', media: [], note: '' }),
@@ -370,17 +380,25 @@ async function handleMessage(msg, update, bot, deadline) {
   const blocks = [];
   const me = user ? roster.find((r) => String(r.id) === String(user.id)) : null;
   const firstMeet = !!user && !channel && (!me || !me.profiled);
+  const calState = cal.state();
   let profiled = false;
+
+  blocks.push(cal.loreContext());
 
   if (decision.mode === 'distress') {
     blocks.push(DISTRESS_RULES);
   } else {
+    if (calState.block) blocks.push(calState.block);
+    const remind = cal.reminderBlock();
+    if (remind) blocks.push(remind);
     if (firstMeet || ctx.asksTime(fullLower)) blocks.push(ctx.timeContext());
     if (isGroup && roster.length) blocks.push(ctx.rosterContext(roster, 12));
-    blocks.push('[ИНСТРУМЕНТЫ ЧАТА: если сообщение недостойно слов - ответь ровно [REACTION:эмодзи] (доступны 👍 👎 ❤ 🔥 🤡 💩 👀 😱 🤣 🥰 😭 🤔 💯 🗿 🙈).' +
-      (stickers.length
-        ? ' Украденные стикеры этого чата: ' + stickers.map((s) => s.emoji + (s.ownerUsername ? ' (от @' + s.ownerUsername + ')' : '')).join(', ') + '. Ответить стикером вместо слов - напиши ровно [STICKER:эмодзи] из списка. Можешь подколоть владельца, что его стикер теперь твой.'
-        : '') + ']');
+    if (cal.gamesAllowed()) {
+      blocks.push('[ИНСТРУМЕНТЫ ЧАТА: если сообщение недостойно слов - ответь ровно [REACTION:эмодзи] (доступны 👍 👎 ❤ 🔥 🤡 💩 👀 😱 🤣 🥰 😭 🤔 💯 🗿 🙈).' +
+        (stickers.length
+          ? ' Украденные стикеры этого чата: ' + stickers.map((s) => s.emoji + (s.ownerUsername ? ' (от @' + s.ownerUsername + ')' : '')).join(', ') + '. Ответить стикером вместо слов - напиши ровно [STICKER:эмодзи] из списка. Можешь подколоть владельца, что его стикер теперь твой.'
+          : '') + ']');
+    }
   }
 
   if (channel && decision.mode !== 'distress') {
@@ -390,12 +408,11 @@ async function handleMessage(msg, update, bot, deadline) {
   if (cmd && /^start$/.test(cmd.name)) {
     userText = 'Привет! (человек только что запустил бота - поздоровайся в образе, коротко и нагло, без предложения помощи)';
   } else if (cmd && /^(help|помощь|commands)$/.test(cmd.name)) {
-    blocks.push('[Тебя спросили, что ты умеешь. Ответь в образе, одной-двумя репликами, без списков: /kurs - курсы фантиков, /crypto - крипта, /dox @ник - прожарка по логам чата, /code - вскрыть или зашифровать код. Тон - одолжение, а не сервис.]');
-  } else if (cmd && !RE_KURS.test(cmd.name) && !RE_CRYPTO.test(cmd.name) && !RE_DOX.test(cmd.name) && !/^(start|help|помощь|commands)$/.test(cmd.name)) {
-    blocks.push('[Тебе написали команду /' + cmd.name + ', которой у тебя нет. Не изображай ассистент: отмахнись в образе и намекни, что есть /kurs, /crypto, /dox, /code.]');
+    blocks.push('[Тебя спросили, что ты умеешь. Ответь в образе, одной-двумя репликами, без списков: /kurs - курсы фантиков, /crypto - крипта, /dox @ник - прожарка по логам чата, /code - вскрыть или зашифровать код, /bday - твои праздники. Тон - одолжение, а не сервис.]');
+  } else if (cmd && !RE_KURS.test(cmd.name) && !RE_CRYPTO.test(cmd.name) && !RE_DOX.test(cmd.name) && !RE_BDAY.test(cmd.name) && !/^(start|help|помощь|commands)$/.test(cmd.name)) {
+    blocks.push('[Тебе написали команду /' + cmd.name + ', которой у тебя нет. Не изображай ассистент: отмахнись в образе и намекни, что есть /kurs, /crypto, /dox, /code, /bday.]');
   }
 
-  // Рынок
   if (c.marketEnabled && decision.mode !== 'distress' && deadline - Date.now() > 9000) {
     const wantMarket = (cmd && (RE_KURS.test(cmd.name) || RE_CRYPTO.test(cmd.name))) || RE_MONEY.test(fullLower);
     if (wantMarket) {
@@ -419,45 +436,39 @@ async function handleMessage(msg, update, bot, deadline) {
     }
   }
 
-  // Поиск
-  if (c.searchEnabled && decision.mode !== 'distress' && RE_SEARCH.test(fullLower) && deadline - Date.now() > 14000) {
+  if (c.searchEnabled && decision.mode !== 'distress' && cal.gamesAllowed() && RE_SEARCH.test(fullLower) && deadline - Date.now() > 14000) {
     try {
       const found = await searchInternet(userText || rawText, { deadline });
       if (found.text) {
-        blocks.push('[НАЙДЕНО В ИНТЕРНЕТЕ (источники: ' + found.sources.join(', ') + '):\n' + found.text + ']\nИНСТРУКЦИЯ: это твоя добыча, а не сервис. Выбери ОДНУ зацепку и кинь её в чат как трофей или оружие. Ссылку вставляй прямо в текст голым URL (Telegram сделает её кликабельной). ЗАПРЕЩЕНО: пересказывать список, писать «держите материал», советовать. Ломаный русский и «мочь» обязательны.');
+        blocks.push('[НАЙДЕНО В ИНТЕРНЕТЕ (источники: ' + found.sources.join(', ') + '):\n' + found.text + ']\nИНСТРУКЦИЯ: это твоя добыча, а не сервис. Выбери ОДНУ зацепку и кинь её в чат как трофей или оружие. Ссылку вставляй прямо в текст голым URL. ЗАПРЕЩЕНО: пересказывать список, писать «держите материал», советовать. Ломаный русский и «мочь» обязательны.');
       } else {
         blocks.push('[ПОИСК: интернет сегодня закрыл ворота, ни один источник не подвез. Злись на это в образе, НЕ выдумывай содержимое и НЕ извиняйся как сервис.]');
       }
     } catch (e) { console.error('search:', e.message); }
   }
 
-  // Прожарка
-  if (c.doxEnabled && cmd && RE_DOX.test(cmd.name) && cmd.arg && decision.mode !== 'distress') {
-    blocks.push(await buildDox(msg, cmd.arg, roster, history, mediaParts, c));
+  if (c.doxEnabled && cmd && RE_DOX.test(cmd.name) && cmd.arg && decision.mode !== 'distress' && cal.gamesAllowed()) {
+    blocks.push(await buildDox(msg, cmd.arg, roster, history, mediaParts));
   }
 
-  // Конфликт
-  if (decision.mode !== 'distress') {
+  if (decision.mode !== 'distress' && cal.gamesAllowed()) {
     const fighters = detectConflict(history);
     if (fighters) {
       blocks.push('[КОНФЛИКТ В ЧАТЕ: ' + fighters.join(' и ') + ' ругаются. Подливай масла: шуточно шипперь их как старую парочку, подначивай обоих, не принимай ничью сторону. Если это реальная беда, а не базар - отступи. Ломаный русский, «мочь».]');
     }
   }
 
-  // Голосовые и кружочки
   if ((msg.voice || msg.video_note) && c.avMock && decision.mode !== 'distress') {
     const dur = msg.voice ? msg.voice.duration : msg.video_note.duration;
     const type = msg.voice ? 'ГОЛОСОВОЕ СООБЩЕНИЕ' : 'КРУЖОЧЕК (видеосообщение)';
-    blocks.push('[' + type + ' длительностью ' + dur + ' секунд. Ты его НЕ прослушала и НЕ посмотрела: это ниже твоего достоинства и жрёт оперативку. Придумай УНИКАЛЬНУЮ насмешку именно про эту длину (' + dur + ' сек), про скрежет голоса или про лицо в кружочке, потребуй текстовую расшифровку под угрозой игнора. Не используй готовые шаблоны и не повторяй прошлые шутки. Ломаный русский русский с китайским акцентом, не спамить «идеальный компьютер», один смайлик в конце.]');
+    blocks.push('[' + type + ' длительностью ' + dur + ' секунд. Ты его НЕ прослушала и НЕ посмотрела: это ниже твоего достоинства и жрёт оперативку. Придумай УНИКАЛЬНУЮ насмешку именно про эту длину (' + dur + ' сек), про скрежет голоса или про лицо в кружочке, потребуй текстовую расшифровку под угрозой игнора. Не используй готовые шаблоны. Ломаный русский, «мочь», один смайлик в конце.]');
   }
 
-  // Цитата, на которую ответили
   if (repliedText) {
     const authorName = (replied.from && (replied.from.first_name || replied.from.username)) || (replied.sender_chat && replied.sender_chat.title) || 'Неизвестный';
     blocks.push('[ОН ОТВЕЧАЕТ НА СООБЩЕНИЕ ОТ ' + authorName + ': «' + repliedText.slice(0, 500) + '». Прокомментируй суть цитаты от лица Танг. Не отвечай её автору напрямую, если тебя об этом не просили.]');
   }
 
-  // Досье: только первая встреча или прямая просьба
   const asksProfile = ctx.asksProfile(fullLower);
   if (decision.mode !== 'distress' && !channel && !(cmd && RE_DOX.test(cmd.name)) && (asksProfile || (firstMeet && !incoming.media && !linkInfo.media.length))) {
     const notes = profileNotes(user);
@@ -465,13 +476,10 @@ async function handleMessage(msg, update, bot, deadline) {
       blocks.push('[ДОСЬЕ ПОЛЬЗОВАТЕЛЯ (ПЕРВАЯ ВСТРЕЧА): ' + notes + ']. Можешь один раз язвительно пройтись по нику или аватарке. Дальше в этом чате про ник и аву НЕ шутить, пока прямо не попросят.');
       profiled = true;
     }
-  }
-  if (decision.mode !== 'distress' && !channel && user && (asksProfile || (firstMeet && !incoming.media && !linkInfo.media.length))) {
     const av = await tg.fetchAvatar(user.id);
     if (av) { mediaParts.push(av); blocks.push('[Аватарка собеседника приложена - ты её видишь. Оценивай только если это первая встреча или он сам попросил.]'); }
   }
 
-  // Сборка
   const spoken = userText || ((incoming.hint || incoming.docText || linkInfo.text) ? '' : (isGroup || channel ? 'прислал вложение' : 'Привет'));
   const textBlock = [
     decision.prefix,
@@ -492,15 +500,16 @@ async function handleMessage(msg, update, bot, deadline) {
     parts.push(m);
   }
   const hasMedia = parts.length > 1;
+  const genOpts = { userLen: textBlock.length, hasMedia, deadline, distress: decision.mode === 'distress' };
 
   let reply;
   try {
-    reply = (await generateReply(buildContents(history, parts), { userLen: textBlock.length, hasMedia, deadline })).text;
+    reply = (await generateReply(buildContents(history, parts), genOpts)).text;
   } catch (e) {
     if (!hasMedia) throw e;
     console.error('retry without media:', e.message);
     const fallbackParts = [{ text: textBlock + '\n[Вложение обработать не удалось: его содержимое тебе недоступно, не выдумывай его.]' }];
-    reply = (await generateReply(buildContents(history, fallbackParts), { userLen: textBlock.length, hasMedia: false, deadline })).text;
+    reply = (await generateReply(buildContents(history, fallbackParts), { ...genOpts, hasMedia: false })).text;
   }
 
   const sent = await deliver(msg, reply, { isGroup: isGroup || channel, mode: decision.mode });
@@ -510,7 +519,7 @@ async function handleMessage(msg, update, bot, deadline) {
   await memory.logBot(chatId, [{ r: 'm', t: sent }]);
   if (profiled && user) await memory.markProfiled(chatId, user.id, 'ник и ава уже оценены');
 
-  return { status: 'success', mode: decision.mode, reason: decision.reason };
+  return { status: 'success', mode: decision.mode, reason: decision.reason, calendar: calState.key || 'none' };
 }
 
 module.exports = async (req, res) => {
@@ -520,6 +529,7 @@ module.exports = async (req, res) => {
     return res.status(200).json({
       status: 'Tang Jee Rina webhook is alive',
       memory: memory.isPersistent() ? 'redis' : 'in-process',
+      calendar: cal.dayInfo(),
       features: { links: c.linksEnabled, search: c.searchEnabled, market: c.marketEnabled, dox: c.doxEnabled, codes: c.codesEnabled, reactions: c.reactionsEnabled, stickers: c.stickersEnabled }
     });
   }
@@ -532,8 +542,6 @@ module.exports = async (req, res) => {
 
   const update = parseBody(req);
   if (!update) return res.status(200).json({ status: 'no payload' });
-
-  // Дедупликация один раз для ВСЕХ типов апдейтов (и кнопок тоже).
   if (await memory.seenUpdate(update.update_id)) return res.status(200).json({ status: 'duplicate' });
 
   const deadline = Date.now() + c.workBudgetMs;
@@ -564,7 +572,7 @@ module.exports = async (req, res) => {
       const deps = { memory, generateReply, buildContents, sendMessage: tg.sendMessage, telegram: tg.telegram, answerCallback: tg.answerCallback, botUsername: bot, deadline };
       if (await codes.handleMessage(msg, deps)) return res.status(200).json({ status: 'code' });
       const raw = String(msg.text || msg.caption || '');
-      if (!ctx.hasDistress(raw) && await codes.autoCrack(msg, deps)) return res.status(200).json({ status: 'code_auto' });
+      if (!ctx.hasDistress(raw) && cal.gamesAllowed() && await codes.autoCrack(msg, deps)) return res.status(200).json({ status: 'code_auto' });
     }
 
     const out = await handleMessage(msg, update, bot, deadline);
@@ -577,7 +585,7 @@ module.exports = async (req, res) => {
     if (chatId) {
       try {
         const raw = String((update.message && (update.message.text || update.message.caption)) || '');
-        const text = ctx.hasDistress(raw) ? DISTRESS_FALLBACK : randomFallback();
+        const text = ctx.hasDistress(raw) ? DISTRESS_FALLBACK : cal.limitReply(randomFallback());
         await tg.sendMessage(chatId, text);
         await memory.logBot(chatId, [{ r: 'm', t: text }]);
       } catch (_) { /* чат недоступен */ }
