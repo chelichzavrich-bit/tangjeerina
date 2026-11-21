@@ -14,6 +14,26 @@ const { randomFallback } = require('../lib/fallbacks');
 const { searchInternet } = require('../lib/search');
 const { DISTRESS_RULES } = require('../lib/prompts');
 
+const envNum = (name, def) => {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return def;
+  const v = Number(raw);
+  return Number.isFinite(v) ? v : def;
+};
+const envFlag = (name, def) => {
+  const raw = String(process.env[name] === undefined ? '' : process.env[name]).trim().toLowerCase();
+  if (!raw) return def;
+  return !['0', 'off', 'false', 'no'].includes(raw);
+};
+
+// Приоритетные срабатывания (лор-слова) идут ОТДЕЛЬНО от普通ной спонтанности:
+// свой короткий кулдаун и свой часовой лимит, чтобы случайные реплики их не съедали.
+const PRIORITY = {
+  always: envFlag('REACT_STRONG_ALWAYS', true),
+  cooldownSec: Math.max(0, envNum('PRIORITY_COOLDOWN_SECONDS', 45)),
+  perHour: Math.max(1, Math.floor(envNum('PRIORITY_PER_HOUR', 12)))
+};
+
 const INSULTS = ['блядь', 'сука', 'пидор', 'уёбок', 'мудак', 'говно', 'хуй', 'ёбан', 'долбоёб', 'ублюдок', 'мразь', 'тварь', 'урод', 'дебил', 'идиот', 'заткнись', 'пошёл нах'];
 const RE_SEARCH = /найди|поищи|search|погугли|что в интернете|на ютубе|мем про|видео про|реддит|reddit|статья|статью|новост|гугл|google|кто так|что за/i;
 const RE_MONEY = /доллар|евро|рубл|юан|биткоин|\bbtc\b|\beth\b|\bsol\b|\bton\b|крипт|курс|инфляц|цен[аыу]|деньг|бабл|портфел|ликвидац/i;
@@ -22,10 +42,14 @@ const RE_KURS = /^(kurs|курс|kursy)$/i;
 const RE_CRYPTO = /^(crypto|крипта)$/i;
 const RE_BDAY = /^(bday|birthday|др|деньрождения|праздники|dates)$/i;
 const RE_CREDIT = /^(credit|кредит|coins|коины|танджикоин|tangcoin|socialcredit|rating|рейтинг|топ|top)$/i;
+const RE_TRIGGER = /^(trigger|check|слово|триггер|words|почему)$/i;
 
 const DISTRESS_FALLBACK = 'Эй. Не делать глупость, слышать? Идти к живой человек рядом - мать, друг, кто угодно, и сказать вслух, что тебе плохо. Если совсем край - звонить в служба помощь, там мочь вытащить. Я тебе не мамка, но я это слушать не хотеть.';
 
 const MARKET_RULES = 'ИНСТРУКЦИЯ: это твоя добыча, а не справка. Вплети числа словами в одну язвительную реплику (1-3 предложения), сравни с чем-то абсурдным из своего лора (мандарины, ветки Жака, вахтёрская, оффшор). ЗАПРЕЩЕНО: финансовые советы, сухой список, тон ассистента. Ломаный русский и «мочь» обязательны, один смайлик в конце из ☺️ 🤗 😋 🤭 🫣.';
+
+const SPONT_PREFIX = '[СПОНТАННОЕ ВМЕШАТЕЛЬСТВО: ты сама решила вклиниться, тебя не звали. Брось реплику в чат про тему, как участница, которая услышала разговор. Коротко, 1-3 предложения.]';
+const PRIORITY_PREFIX = '[ТЕБЯ ЗАДЕЛИ ЗА ЖИВОЕ: в сообщении прозвучало слово из твоего лора, и ты не мочь мимо пройти. Вклинивайся сама, без приглашения, но по существу этого слова. Не обращайся к автору как к клиенту. 1-3 предложения, ярко.]';
 
 function parseBody(req) {
   if (typeof req.body === 'string') { try { return JSON.parse(req.body); } catch (_) { return null; } }
@@ -42,7 +66,7 @@ function isChannelPost(msg, update) {
   return !!update.channel_post || !!(msg.sender_chat && msg.sender_chat.type === 'channel');
 }
 function commandOf(text, bot) {
-  const m = /^\/([A-Za-z0-9_]+)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/.exec(String(text || '').trim());
+  const m = /^\/([A-Za-z0-9_а-яё]+)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i.exec(String(text || '').trim());
   if (!m) return null;
   const target = (m[2] || '').toLowerCase();
   if (target && bot && target !== bot) return null;
@@ -55,13 +79,15 @@ function replyToBot(msg, bot) {
   return !bot || un === bot;
 }
 
+// ───────────── решать, отвечать ли ─────────────
 function decide(msg, { isGroup, channel, bot, meta, c, rawText }) {
   const text = String(rawText || '').toLowerCase();
   const repliedText = String((msg.reply_to_message && (msg.reply_to_message.text || msg.reply_to_message.caption)) || '').toLowerCase();
   const full = text + ' ' + repliedText;
   const cmd = commandOf(rawText, bot);
   const mentioned = !!bot && full.includes('@' + bot);
-  const addressed = !isGroup || channel || !!cmd || mentioned || replyToBot(msg, bot) || ctx.hasName(full);
+  const level = ctx.tier(full);
+  const addressed = !isGroup || channel || !!cmd || mentioned || replyToBot(msg, bot) || level === 'name' || level === 'always';
 
   if (ctx.hasDistress(full)) {
     return addressed ? { mode: 'distress', reason: 'distress', prefix: '' } : { mode: 'skip', reason: 'distress-not-addressed' };
@@ -73,15 +99,27 @@ function decide(msg, { isGroup, channel, bot, meta, c, rawText }) {
   if (cmd) return { mode: 'direct', reason: 'command', prefix: '' };
   if (mentioned) return { mode: 'direct', reason: 'mention', prefix: '' };
   if (replyToBot(msg, bot)) return { mode: 'direct', reason: 'reply', prefix: '' };
-  if (ctx.hasName(full)) return { mode: 'direct', reason: 'name', prefix: '' };
+  if (level === 'name') return { mode: 'direct', reason: 'name', prefix: '' };
+  if (level === 'always') return { mode: 'direct', reason: 'always-word', prefix: '' };
+
+  // Лор-слова: отдельная приоритетная дорожка, не зависит от общего кулдауна и лимита.
+  if (level === 'strong' && PRIORITY.always) {
+    if (!cal.spontAllowed()) return { mode: 'skip', reason: 'calendar-silent' };
+    if (ctx.hasIgnore(full)) return { mode: 'skip', reason: 'ignore-word' };
+    const since = Date.now() - (meta.lastPriorityAt || 0);
+    if (since < PRIORITY.cooldownSec * 1000) return { mode: 'skip', reason: 'priority-cooldown' };
+    return { mode: 'priority', reason: 'lore', prefix: PRIORITY_PREFIX };
+  }
+
   if (!cal.spontAllowed()) return { mode: 'skip', reason: 'calendar-silent' };
+  if (ctx.hasIgnore(full)) return { mode: 'skip', reason: 'ignore-word' };
 
   let p = 0;
   let why = '';
   if (msg.new_chat_members && msg.new_chat_members.length) { p = c.reactJoin; why = 'join'; }
-  else if (ctx.hasStrong(full)) { p = c.reactStrong; why = 'lore'; }
-  else if (ctx.hasWeak(full)) { p = c.reactWeak; why = 'weak'; }
-  else if (ctx.hasTopic(full)) { p = c.reactTopic; why = 'topic'; }
+  else if (level === 'strong') { p = c.reactStrong; why = 'lore'; }
+  else if (level === 'weak') { p = c.reactWeak; why = 'weak'; }
+  else if (level === 'topic') { p = c.reactTopic; why = 'topic'; }
   if (!p && links.extractUrls(msg, 1).length) { p = c.reactLink; why = 'link'; }
   if (!p && (msg.photo || msg.sticker)) { p = c.reactPhoto; why = 'media'; }
   if (!p) { p = c.reactRandom; why = 'random'; }
@@ -89,11 +127,7 @@ function decide(msg, { isGroup, channel, bot, meta, c, rawText }) {
   if (Date.now() - (meta.lastBotAt || 0) < c.cooldownSec * 1000) return { mode: 'skip', reason: 'cooldown' };
   const chance = Math.min(0.95, p * cal.moodFactor());
   if (Math.random() >= chance) return { mode: 'skip', reason: 'chance' };
-  return {
-    mode: 'spontaneous',
-    reason: why,
-    prefix: '[СПОНТАННОЕ ВМЕШАТЕЛЬСТВО: ты сама решила вклиниться, тебя не звали. Брось реплику в чат про тему, как участница, которая услышала разговор. Коротко, 1-3 предложения.]'
-  };
+  return { mode: 'spontaneous', reason: why, prefix: SPONT_PREFIX };
 }
 
 function detectConflict(history) {
@@ -313,11 +347,49 @@ async function handleMessage(msg, update, bot, deadline) {
       return { status: 'ignored', reason: 'hour-limit' };
     }
   }
+  if (decision.mode === 'priority') {
+    try {
+      const [n] = await memory.exec([['INCR', `tj4:pri:${chatId}`], ['EXPIRE', `tj4:pri:${chatId}`, 3600]]);
+      if (Number(n) > PRIORITY.perHour) {
+        await logUser(histText);
+        return { status: 'ignored', reason: 'priority-hour-limit' };
+      }
+    } catch (e) { console.error('priority counter:', e.message); }
+  }
 
   tg.sendChatAction(chatId, 'typing');
   const cmd = commandOf(rawText, bot);
 
   // ── Мгновенные команды без модели ──
+  if (cmd && RE_TRIGGER.test(cmd.name)) {
+    const probe = cmd.arg || 'Жак';
+    const level = ctx.tier(probe.toLowerCase());
+    const now = Date.now();
+    let sp = 0, pri = 0;
+    try {
+      const [a, b] = await memory.exec([['GET', `tj4:sp:${chatId}`], ['GET', `tj4:pri:${chatId}`]]);
+      sp = Number(a) || 0;
+      pri = Number(b) || 0;
+    } catch (_) {}
+    const sinceBot = Math.round((now - (meta.lastBotAt || 0)) / 1000);
+    const sincePri = Math.round((now - (meta.lastPriorityAt || 0)) / 1000);
+    const calNow = cal.dayInfo();
+    const text = [
+      'ПРОВЕРКА СЛОВА: «' + probe + '»',
+      'уровень: ' + (ctx.TIER_RU[level] || level),
+      'лор-слова всегда: ' + (PRIORITY.always ? 'да' : 'нет'),
+      'кулдаун обычный: ' + c.cooldownSec + ' с, прошло ' + sinceBot + ' с',
+      'кулдаун лор: ' + PRIORITY.cooldownSec + ' с, прошло ' + sincePri + ' с',
+      'лимит в час: обычные ' + sp + '/' + c.spontPerHour + ', лор ' + pri + '/' + PRIORITY.perHour,
+      'календарь: ' + (calNow.key || 'обычный день') + ', сама вклиниваться ' + (cal.spontAllowed() ? 'мочь' : 'НЕ мочь'),
+      'настроение: x' + cal.moodFactor().toFixed(2),
+      'свои слова ALWAYS_WORDS: ' + (ctx.describe().always.join(', ') || 'пусто'),
+      'ну и цто ты хотеть услышать, я всё равно лучше тебя ☺️'
+    ].join('\n');
+    await tg.sendMessage(chatId, text, isGroup ? { replyTo: msg.message_id } : {});
+    await logUser(rawText);
+    return { status: 'trigger_check', level };
+  }
   if (cmd && RE_CREDIT.test(cmd.name)) {
     const text = await credit.command(chatId, cmd.arg, user && user.id);
     await tg.sendMessage(chatId, text, isGroup ? { replyTo: msg.message_id } : {});
@@ -401,7 +473,7 @@ async function handleMessage(msg, update, bot, deadline) {
     userText = 'Привет! (человек только что запустил бота - поздоровайся в образе, коротко и нагло)';
   } else if (cmd && /^(help|помощь|commands)$/.test(cmd.name)) {
     blocks.push('[Тебя спросили, что ты умеешь. Ответь в образе, одной-двумя репликами, без списков: /kurs, /crypto, /dox @ник, /code, /bday, /credit. Тон - одолжение, а не сервис.]');
-  } else if (cmd && !RE_KURS.test(cmd.name) && !RE_CRYPTO.test(cmd.name) && !RE_DOX.test(cmd.name) && !RE_BDAY.test(cmd.name) && !RE_CREDIT.test(cmd.name) && !/^(start|help|помощь|commands)$/.test(cmd.name)) {
+  } else if (cmd && !RE_KURS.test(cmd.name) && !RE_CRYPTO.test(cmd.name) && !RE_DOX.test(cmd.name) && !RE_BDAY.test(cmd.name) && !RE_CREDIT.test(cmd.name) && !RE_TRIGGER.test(cmd.name) && !/^(start|help|помощь|commands)$/.test(cmd.name)) {
     blocks.push('[Тебе написали команду /' + cmd.name + ', которой у тебя нет. Отмахнись в образе и намекни, что есть /kurs, /crypto, /dox, /code, /credit.]');
   }
 
@@ -494,7 +566,6 @@ async function handleMessage(msg, update, bot, deadline) {
     reply = (await generateReply(buildContents(history, [{ text: textBlock + '\n[Вложение обработать не удалось, не выдумывай его.]' }]), { ...genOpts, hasMedia: false })).text;
   }
 
-  // Молчаливое начисление + срез служебных тегов ДО отправки.
   const cr = await credit.processMessage({
     chatId, user, userText: spoken || rawText, reply,
     mode: decision.mode, history, distress: decision.mode === 'distress'
@@ -504,10 +575,12 @@ async function handleMessage(msg, update, bot, deadline) {
 
   const histUser = [who + (spoken || histText), incoming.histNote, linkInfo.note].filter(Boolean).join(' ');
   await memory.logIncoming(chatId, [{ r: 'u', t: histUser }], { type: chatType, user, senderChat: msg.sender_chat });
-  await memory.logBot(chatId, [{ r: 'm', t: sent }]);
+  await memory.logBot(chatId, [{ r: 'm', t: sent }], {
+    extraMeta: decision.mode === 'priority' ? { lastPriorityAt: Date.now() } : null
+  });
   if (profiled && user) await memory.markProfiled(chatId, user.id, 'ник и ава уже оценены');
 
-  return { status: 'success', mode: decision.mode, credit: cr.applied || 0, calendar: calState.key || 'none' };
+  return { status: 'success', mode: decision.mode, reason: decision.reason, credit: cr.applied || 0, calendar: calState.key || 'none' };
 }
 
 module.exports = async (req, res) => {
@@ -519,6 +592,8 @@ module.exports = async (req, res) => {
       memory: memory.isPersistent() ? 'redis' : 'in-process',
       calendar: cal.dayInfo(),
       credit: credit.enabled() ? 'on' : 'off',
+      priority: PRIORITY,
+      words: ctx.describe(),
       features: { links: c.linksEnabled, search: c.searchEnabled, market: c.marketEnabled, dox: c.doxEnabled, codes: c.codesEnabled, reactions: c.reactionsEnabled, stickers: c.stickersEnabled }
     });
   }
@@ -576,7 +651,6 @@ module.exports = async (req, res) => {
         const raw = String((update.message && (update.message.text || update.message.caption)) || '');
         const isDistress = ctx.hasDistress(raw);
         const fb = isDistress ? DISTRESS_FALLBACK : cal.limitReply(randomFallback());
-        // Даже на полной поломке начисление работает молча.
         const cr = await credit.processMessage({
           chatId, user: update.message && update.message.from, userText: raw, reply: fb,
           mode: 'direct', distress: isDistress
