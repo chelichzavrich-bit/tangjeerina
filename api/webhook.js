@@ -9,6 +9,9 @@ const market = require('../lib/market');
 const ctx = require('../lib/context');
 const cal = require('../lib/calendar');
 const credit = require('../lib/credit');
+const traps = require('../lib/traps');
+const drunk = require('../lib/drunk');
+const vision = require('../lib/vision');
 const { generateReply, buildContents } = require('../lib/ai');
 const { randomFallback } = require('../lib/fallbacks');
 const { searchInternet } = require('../lib/search');
@@ -26,8 +29,6 @@ const envFlag = (name, def) => {
   return !['0', 'off', 'false', 'no'].includes(raw);
 };
 
-// Приоритетные срабатывания (лор-слова) идут ОТДЕЛЬНО от普通ной спонтанности:
-// свой короткий кулдаун и свой часовой лимит, чтобы случайные реплики их не съедали.
 const PRIORITY = {
   always: envFlag('REACT_STRONG_ALWAYS', true),
   cooldownSec: Math.max(0, envNum('PRIORITY_COOLDOWN_SECONDS', 45)),
@@ -43,6 +44,7 @@ const RE_CRYPTO = /^(crypto|крипта)$/i;
 const RE_BDAY = /^(bday|birthday|др|деньрождения|праздники|dates)$/i;
 const RE_CREDIT = /^(credit|кредит|coins|коины|танджикоин|tangcoin|socialcredit|rating|рейтинг|топ|top)$/i;
 const RE_TRIGGER = /^(trigger|check|слово|триггер|words|почему)$/i;
+const RE_BAIJIU = /^(baijiu|байцзю|vodka|пьяная|налить)$/i;
 
 const DISTRESS_FALLBACK = 'Эй. Не делать глупость, слышать? Идти к живой человек рядом - мать, друг, кто угодно, и сказать вслух, что тебе плохо. Если совсем край - звонить в служба помощь, там мочь вытащить. Я тебе не мамка, но я это слушать не хотеть.';
 
@@ -79,7 +81,6 @@ function replyToBot(msg, bot) {
   return !bot || un === bot;
 }
 
-// ───────────── решать, отвечать ли ─────────────
 function decide(msg, { isGroup, channel, bot, meta, c, rawText }) {
   const text = String(rawText || '').toLowerCase();
   const repliedText = String((msg.reply_to_message && (msg.reply_to_message.text || msg.reply_to_message.caption)) || '').toLowerCase();
@@ -102,7 +103,6 @@ function decide(msg, { isGroup, channel, bot, meta, c, rawText }) {
   if (level === 'name') return { mode: 'direct', reason: 'name', prefix: '' };
   if (level === 'always') return { mode: 'direct', reason: 'always-word', prefix: '' };
 
-  // Лор-слова: отдельная приоритетная дорожка, не зависит от общего кулдауна и лимита.
   if (level === 'strong' && PRIORITY.always) {
     if (!cal.spontAllowed()) return { mode: 'skip', reason: 'calendar-silent' };
     if (ctx.hasIgnore(full)) return { mode: 'skip', reason: 'ignore-word' };
@@ -320,10 +320,12 @@ async function handleMessage(msg, update, bot, deadline) {
   const rawText = String(msg.text || msg.caption || '').trim();
   const user = msg.from || null;
   const who = (isGroup || channel) ? '[' + authorLabel(msg) + ']: ' : '';
+  const distressHere = ctx.hasDistress(rawText);
 
   if (c.stickersEnabled && msg.sticker && msg.sticker.file_id) {
     await memory.saveSticker(chatId, { emoji: msg.sticker.emoji || '🙂', fileId: msg.sticker.file_id, user });
   }
+  if (isGroup) { try { await traps.sweep(chatId); } catch (_) {} }
 
   const meta = (isGroup || channel) ? await memory.getMeta(chatId) : {};
   const decision = decide(msg, { isGroup, channel, bot, meta, c, rawText });
@@ -335,15 +337,21 @@ async function handleMessage(msg, update, bot, deadline) {
             : msg.document ? '[файл ' + (msg.document.file_name || '') + ']' : '[вложение]');
 
   const logUser = async (t) => memory.logIncoming(chatId, [{ r: 'u', t: who + t }], { type: chatType, user, senderChat: msg.sender_chat });
+  const dropTrap = async () => {
+    if (!isGroup || distressHere) return;
+    try { await traps.maybeDrop(msg); } catch (_) {}
+  };
 
   if (decision.mode === 'skip') {
     await logUser(histText);
+    await dropTrap();
     return { status: 'ignored', reason: decision.reason };
   }
   if (decision.mode === 'spontaneous') {
     const n = await memory.bumpSpont(chatId);
     if (n > c.spontPerHour) {
       await logUser(histText);
+      await dropTrap();
       return { status: 'ignored', reason: 'hour-limit' };
     }
   }
@@ -352,6 +360,7 @@ async function handleMessage(msg, update, bot, deadline) {
       const [n] = await memory.exec([['INCR', `tj4:pri:${chatId}`], ['EXPIRE', `tj4:pri:${chatId}`, 3600]]);
       if (Number(n) > PRIORITY.perHour) {
         await logUser(histText);
+        await dropTrap();
         return { status: 'ignored', reason: 'priority-hour-limit' };
       }
     } catch (e) { console.error('priority counter:', e.message); }
@@ -361,6 +370,13 @@ async function handleMessage(msg, update, bot, deadline) {
   const cmd = commandOf(rawText, bot);
 
   // ── Мгновенные команды без модели ──
+  if (cmd && RE_BAIJIU.test(cmd.name)) {
+    const text = await drunk.command(chatId, user, isGroup);
+    await tg.sendMessage(chatId, text, isGroup ? { replyTo: msg.message_id } : {});
+    await logUser(rawText);
+    await memory.logBot(chatId, [{ r: 'm', t: text }]);
+    return { status: 'baijiu' };
+  }
   if (cmd && RE_TRIGGER.test(cmd.name)) {
     const probe = cmd.arg || 'Жак';
     const level = ctx.tier(probe.toLowerCase());
@@ -424,12 +440,13 @@ async function handleMessage(msg, update, bot, deadline) {
     return { status: 'dox_hint' };
   }
 
-  const [incoming, linkInfo, history, roster, stickers] = await Promise.all([
+  const [incoming, linkInfo, history, roster, stickers, drinkState] = await Promise.all([
     readIncoming(msg, { mockAV: c.avMock }),
     (c.linksEnabled && deadline - Date.now() > 9000) ? readLinks(msg, c, deadline) : Promise.resolve({ text: '', media: [], note: '' }),
     memory.getHistory(chatId),
     memory.getRoster(chatId),
-    c.stickersEnabled ? memory.listStickers(chatId, 12) : Promise.resolve([])
+    c.stickersEnabled ? memory.listStickers(chatId, 12) : Promise.resolve([]),
+    drunk.state(chatId)
   ]);
 
   let userText = String(incoming.userText || '');
@@ -453,6 +470,8 @@ async function handleMessage(msg, update, bot, deadline) {
     if (calState.block) blocks.push(calState.block);
     const remind = cal.reminderBlock();
     if (remind) blocks.push(remind);
+    if (drinkState.drunk) blocks.push(drunk.drunkBlock());
+    else if (drinkState.hangover) blocks.push(drunk.hangoverBlock());
     const ct = credit.tagBlock();
     if (ct) blocks.push(ct);
     if (firstMeet || ctx.asksTime(fullLower)) blocks.push(ctx.timeContext());
@@ -472,9 +491,9 @@ async function handleMessage(msg, update, bot, deadline) {
   if (cmd && /^start$/.test(cmd.name)) {
     userText = 'Привет! (человек только что запустил бота - поздоровайся в образе, коротко и нагло)';
   } else if (cmd && /^(help|помощь|commands)$/.test(cmd.name)) {
-    blocks.push('[Тебя спросили, что ты умеешь. Ответь в образе, одной-двумя репликами, без списков: /kurs, /crypto, /dox @ник, /code, /bday, /credit. Тон - одолжение, а не сервис.]');
-  } else if (cmd && !RE_KURS.test(cmd.name) && !RE_CRYPTO.test(cmd.name) && !RE_DOX.test(cmd.name) && !RE_BDAY.test(cmd.name) && !RE_CREDIT.test(cmd.name) && !RE_TRIGGER.test(cmd.name) && !/^(start|help|помощь|commands)$/.test(cmd.name)) {
-    blocks.push('[Тебе написали команду /' + cmd.name + ', которой у тебя нет. Отмахнись в образе и намекни, что есть /kurs, /crypto, /dox, /code, /credit.]');
+    blocks.push('[Тебя спросили, что ты умеешь. Ответь в образе, одной-двумя репликами, без списков: /kurs, /crypto, /code, /credit, /baijiu. Тон - одолжение, а не сервис.]');
+  } else if (cmd && !RE_KURS.test(cmd.name) && !RE_CRYPTO.test(cmd.name) && !RE_DOX.test(cmd.name) && !RE_BDAY.test(cmd.name) && !RE_CREDIT.test(cmd.name) && !RE_TRIGGER.test(cmd.name) && !RE_BAIJIU.test(cmd.name) && !/^(start|help|помощь|commands)$/.test(cmd.name)) {
+    blocks.push('[Тебе написали команду /' + cmd.name + ', которой у тебя нет. Отмахнись в образе и намекни, что есть /kurs, /crypto, /code, /credit, /baijiu.]');
   }
 
   if (c.marketEnabled && decision.mode !== 'distress' && deadline - Date.now() > 9000) {
@@ -542,6 +561,10 @@ async function handleMessage(msg, update, bot, deadline) {
     if (av) { mediaParts.push(av); blocks.push('[Аватарка собеседника приложена - ты её видишь.]'); }
   }
 
+  // Правила картинок идут ПОСЛЕДНИМ блоком перед самим сообщением - они главнее старых правил про фото.
+  const hasPicture = !!incoming.media || (linkInfo.media && linkInfo.media.length > 0);
+  if (hasPicture && decision.mode !== 'distress') blocks.push(vision.imageRules());
+
   const spoken = userText || ((incoming.hint || incoming.docText || linkInfo.text) ? '' : (isGroup || channel ? 'прислал вложение' : 'Привет'));
   const textBlock = [decision.prefix, ...blocks, who + spoken, incoming.hint, incoming.docText, linkInfo.text].filter(Boolean).join('\n');
 
@@ -580,7 +603,9 @@ async function handleMessage(msg, update, bot, deadline) {
   });
   if (profiled && user) await memory.markProfiled(chatId, user.id, 'ник и ава уже оценены');
 
-  return { status: 'success', mode: decision.mode, reason: decision.reason, credit: cr.applied || 0, calendar: calState.key || 'none' };
+  await dropTrap();
+
+  return { status: 'success', mode: decision.mode, reason: decision.reason, credit: cr.applied || 0, calendar: calState.key || 'none', drunk: drinkState.drunk };
 }
 
 module.exports = async (req, res) => {
@@ -592,6 +617,8 @@ module.exports = async (req, res) => {
       memory: memory.isPersistent() ? 'redis' : 'in-process',
       calendar: cal.dayInfo(),
       credit: credit.enabled() ? 'on' : 'off',
+      traps: traps.info(),
+      baijiu: drunk.info(),
       priority: PRIORITY,
       words: ctx.describe(),
       features: { links: c.linksEnabled, search: c.searchEnabled, market: c.marketEnabled, dox: c.doxEnabled, codes: c.codesEnabled, reactions: c.reactionsEnabled, stickers: c.stickersEnabled }
@@ -617,6 +644,7 @@ module.exports = async (req, res) => {
       const cq = update.callback_query;
       const deps = { memory, generateReply, buildContents, sendMessage: tg.sendMessage, telegram: tg.telegram, answerCallback: tg.answerCallback, botUsername: bot, deadline };
       if (c.codesEnabled && await codes.handleCallback(cq, deps)) return res.status(200).json({ status: 'code_callback' });
+      if (await traps.handleCallback(cq)) return res.status(200).json({ status: 'trap_callback' });
       await handleCallback(cq, deadline);
       return res.status(200).json({ status: 'callback' });
     }
