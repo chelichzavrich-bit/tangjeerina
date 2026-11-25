@@ -12,12 +12,12 @@ const credit = require('../lib/credit');
 const traps = require('../lib/traps');
 const drunk = require('../lib/drunk');
 const vision = require('../lib/vision');
+const charm = require('../lib/charm');
 const { generateReply, buildContents } = require('../lib/ai');
 const { randomFallback } = require('../lib/fallbacks');
 const { searchInternet } = require('../lib/search');
 const { DISTRESS_RULES } = require('../lib/prompts');
 
-// Новые модули подключаются мягко: если файла ещё нет, бот работает как раньше.
 let admin = null;
 try { admin = require('../lib/admin'); } catch (_) { admin = null; }
 let crosschat = null;
@@ -43,6 +43,10 @@ const PRIORITY = {
   perHour: Math.max(1, Math.floor(envNum('PRIORITY_PER_HOUR', 12)))
 };
 
+// Сколько реплик человека нужно, чтобы она считала его знакомым и перестала обольщать.
+const KNOWN_LOCAL = Math.max(1, Math.floor(envNum('CHARM_KNOWN_LOCAL', 5)));
+const KNOWN_GLOBAL = Math.max(1, Math.floor(envNum('CHARM_KNOWN_GLOBAL', 8)));
+
 const INSULTS = ['блядь', 'сука', 'пидор', 'уёбок', 'мудак', 'говно', 'хуй', 'ёбан', 'долбоёб', 'ублюдок', 'мразь', 'тварь', 'урод', 'дебил', 'идиот', 'заткнись', 'пошёл нах'];
 const RE_SEARCH = /найди|поищи|search|погугли|что в интернете|на ютубе|мем про|видео про|реддит|reddit|статья|статью|новост|гугл|google|кто так|что за/i;
 const RE_MONEY = /доллар|евро|рубл|юан|гривн|гривен|тенге|биткоин|\bbtc\b|\beth\b|\bsol\b|\bton\b|крипт|курс|инфляц|цен[аыу]|деньг|бабл|портфел|ликвидац/i;
@@ -56,10 +60,10 @@ const RE_BAIJIU = /^(baijiu|байцзю|vodka|пьяная|налить)$/i;
 
 const DISTRESS_FALLBACK = 'Эй. Не делать глупость, слышать? Идти к живой человек рядом - мать, друг, кто угодно, и сказать вслух, что тебе плохо. Если совсем край - звонить в служба помощь, там мочь вытащить. Я тебе не мамка, но я это слушать не хотеть.';
 
-const MARKET_RULES = 'ИНСТРУКЦИЯ: это твоя добыча, а не справка. Вплети числа словами в одну язвительную реплику (1-3 предложения), сравни с чем-то абсурдным из своего лора (мандарины, ветки Жака, вахтёрская, оффшор). ЗАПРЕЩЕНО: финансовые советы, сухой список, тон ассистента, повторять прошлые шутки про оффшор. ' + ACCENT + ' Один смайлик в конце из ☺️ 🤗 😋 🤭 🫣.';
+const MARKET_RULES = 'ИНСТРУКЦИЯ: это твоя добыча, а не справка. Вплети числа словами в одну короткую язвительную реплику, сравни с чем-то абсурдным из своего лора. ЗАПРЕЩЕНО: финансовые советы, сухой список, тон ассистента, повторять прошлые шутки. ' + ACCENT;
 
-const SPONT_PREFIX = '[СПОНТАННОЕ ВМЕШАТЕЛЬСТВО: ты сама решила вклиниться, тебя не звали. Брось реплику в чат про тему, как участница, которая услышала разговор. Коротко, 1-3 предложения.]';
-const PRIORITY_PREFIX = '[ТЕБЯ ЗАДЕЛИ ЗА ЖИВОЕ: в сообщении прозвучало слово из твоего лора, и ты не мочь мимо пройти. Вклинивайся сама, без приглашения, но по существу этого слова. Не обращайся к автору как к клиенту. 1-3 предложения, ярко.]';
+const SPONT_PREFIX = '[СПОНТАННОЕ ВМЕШАТЕЛЬСТВО: ты сама решила вклиниться, тебя не звали. Брось реплику в чат про тему, как участница, которая услышала разговор. Коротко, 1-2 предложения.]';
+const PRIORITY_PREFIX = '[ТЕБЯ ЗАДЕЛИ ЗА ЖИВОЕ: в сообщении прозвучало слово из твоего лора, и ты не мочь мимо пройти. Вклинивайся сама, без приглашения, но по существу этого слова. Не обращайся к автору как к клиенту. 1-2 предложения, ярко.]';
 
 function parseBody(req) {
   if (typeof req.body === 'string') { try { return JSON.parse(req.body); } catch (_) { return null; } }
@@ -87,6 +91,15 @@ function replyToBot(msg, bot) {
   if (!r || !r.is_bot) return false;
   const un = String(r.username || '').toLowerCase();
   return !bot || un === bot;
+}
+
+// Знаком ли ей человек: считаем его реплики в этом чате и глобально.
+function familiarity(user, history, globalMsgs) {
+  if (!user || !user.id) return { known: false, local: 0, global: 0 };
+  const uid = String(user.id);
+  const local = (history || []).filter((h) => h.r === 'u' && String(h.uid || '') === uid).length;
+  const global = Number(globalMsgs) || 0;
+  return { known: local >= KNOWN_LOCAL || global >= KNOWN_GLOBAL, local, global };
 }
 
 function decide(msg, { isGroup, channel, bot, meta, c, rawText }) {
@@ -192,8 +205,6 @@ async function readLinks(msg, c, deadline) {
   }
 }
 
-// ───────────── АНТИПОВТОР ─────────────
-// Генерирует ответ, проверяет его против последних её реплик, при совпадении перегенерирует один раз.
 async function generateFresh(chatId, history, parts, genOpts) {
   let reply = (await generateReply(buildContents(history, parts), genOpts)).text;
   if (genOpts.distress) return reply;
@@ -208,8 +219,8 @@ async function generateFresh(chatId, history, parts, genOpts) {
     '[АНТИПОВТОР, ГЛАВНЕЕ ВСЕХ СТИЛЕВЫХ ПРАВИЛ: ты только что чуть не выдала фразу, которую уже говорила в этом чате.',
     'Совпало: ' + verdict.reason + '.',
     recent.length ? 'ТВОИ ПОСЛЕДНИЕ РЕПЛИКИ (НЕ ПОВТОРЯЙ их обороты, начала, цифры и концовки):\n' + recent.map((r, i) => (i + 1) + '. ' + String(r).slice(0, 220)).join('\n') : '',
-    'Придумай ДРУГОЙ заход: другую небылицу, другое сравнение, другое начало. Не начинай с «Ооооооо» и не называй собеседника «наш великий». Не используй одни и те же суммы и одни и те же названия своих выдуманных мест.',
-    ACCENT + ' Ответ 1-3 предложения.]'
+    'Придумай ДРУГОЙ заход и ДРУГОЙ вид вранья. Короче, чем обычно: 1-2 предложения. Не начинай с «Ооооооо», не говори про сертификаты, документы, оффшор и не выставляй счёт.',
+    ACCENT + ']'
   ].filter(Boolean).join('\n');
 
   try {
@@ -298,12 +309,14 @@ async function handleCallback(cq, deadline) {
   let text;
   try {
     const [history, drinkState] = await Promise.all([memory.getHistory(chatId), drunk.state(chatId)]);
+    const fam = familiarity(cq.from, history, 0);
     const blockText = [
       cal.loreContext(),
       cal.block(),
       drinkState.drunk ? drunk.drunkBlock() : (drinkState.hangover ? drunk.hangoverBlock() : ''),
       credit.tagBlock(),
-      '[СВЕЖИЕ ДАННЫЕ РЫНКА (' + payload.type + '): ' + payload.data + ']. ' + MARKET_RULES
+      '[СВЕЖИЕ ДАННЫЕ РЫНКА (' + payload.type + '): ' + payload.data + ']. ' + MARKET_RULES,
+      charm.shortBlock(fam.known)
     ].filter(Boolean).join('\n');
     const parts = [{ text: blockText }];
     const genOpts = { userLen: 120, deadline, distress: false };
@@ -372,11 +385,9 @@ async function handleMessage(msg, update, bot, deadline) {
   }
   if (isGroup) { try { await traps.sweep(chatId); } catch (_) {} }
 
-  // Кросс-чат память: запоминаем человека глобально, чтобы узнавать его в других чатах.
   if (crosschat && user && !user.is_bot) {
-    try { await crosschat.remember(user, chatId); } catch (_) {}
+    try { await crosschat.remember(user, chatId, chatType); } catch (_) {}
   }
-  // Привязка канала к группе: пост пришёл из канала - запоминаем связку.
   if (channel && msg.sender_chat && msg.sender_chat.id) {
     try { await memory.setLinkedChannel(chatId, msg.sender_chat.id); } catch (_) {}
   }
@@ -434,7 +445,6 @@ async function handleMessage(msg, update, bot, deadline) {
   tg.sendChatAction(chatId, 'typing');
   const cmd = commandOf(rawText, bot);
 
-  // ── Мгновенные команды без модели ──
   if (cmd && RE_BAIJIU.test(cmd.name)) {
     const text = await drunk.command(chatId, user, isGroup);
     await tg.sendMessage(chatId, text, isGroup ? { replyTo: msg.message_id } : {});
@@ -466,6 +476,7 @@ async function handleMessage(msg, update, bot, deadline) {
       'настроение: x' + cal.moodFactor().toFixed(2),
       'свои слова ALWAYS_WORDS: ' + (ctx.describe().always.join(', ') || 'пусто'),
       'админка: ' + (admin ? 'подключена' : 'нет модуля') + ', кросс-чат: ' + (crosschat ? 'подключен' : 'нет модуля'),
+      'режим обольщения: включён, знакомым считается от ' + KNOWN_LOCAL + ' реплик тут или ' + KNOWN_GLOBAL + ' всего',
       'ну и цто ты хотеть услышать, я всё равно лучше тебя ☺️'
     ].join('\n');
     await tg.sendMessage(chatId, text, isGroup ? { replyTo: msg.message_id } : {});
@@ -521,6 +532,16 @@ async function handleMessage(msg, update, bot, deadline) {
   const repliedText = replied ? String(replied.text || replied.caption || '') : '';
   const fullLower = (userText + ' ' + repliedText).toLowerCase();
 
+  let globalMsgs = 0;
+  if (crosschat && user && user.id) {
+    try {
+      const gp = await crosschat.profile(user.id);
+      globalMsgs = (gp && gp.msgs) || 0;
+    } catch (_) {}
+  }
+  const fam = familiarity(user, history, globalMsgs);
+  const solo = decision.mode === 'spontaneous' || decision.mode === 'priority';
+
   const mediaParts = [];
   const blocks = [];
   const me = user ? roster.find((r) => String(r.id) === String(user.id)) : null;
@@ -561,7 +582,7 @@ async function handleMessage(msg, update, bot, deadline) {
   }
 
   if (cmd && /^start$/.test(cmd.name)) {
-    userText = 'Привет! (человек только что запустил бота - поздоровайся в образе, коротко и нагло)';
+    userText = 'Привет! (человек только что запустил бота - поздоровайся в образе, коротко и тепло, ты его ещё не знаешь)';
   } else if (cmd && /^(help|помощь|commands)$/.test(cmd.name)) {
     blocks.push('[Тебя спросили, что ты умеешь. Ответь в образе, одной-двумя репликами, без списков: /kurs, /crypto, /code, /credit, /baijiu. Тон - одолжение, а не сервис.]');
   } else if (cmd && !RE_KURS.test(cmd.name) && !RE_CRYPTO.test(cmd.name) && !RE_DOX.test(cmd.name) && !RE_BDAY.test(cmd.name) && !RE_CREDIT.test(cmd.name) && !RE_TRIGGER.test(cmd.name) && !RE_BAIJIU.test(cmd.name) && !/^(start|help|помощь|commands)$/.test(cmd.name)) {
@@ -633,7 +654,11 @@ async function handleMessage(msg, update, bot, deadline) {
     if (av) { mediaParts.push(av); blocks.push('[Аватарка собеседника приложена - ты её видишь.]'); }
   }
 
-  // Правила картинок идут ПОСЛЕДНИМ блоком перед самим сообщением - они главнее старых правил про фото.
+  // Режим общения - последним блоком перед сообщением, он главнее старых правил про хвастовство.
+  if (decision.mode !== 'distress') {
+    blocks.push(charm.block({ known: fam.known, solo, drunk: drinkState.drunk }));
+  }
+
   const hasPicture = !!incoming.media || (linkInfo.media && linkInfo.media.length > 0);
   if (hasPicture && decision.mode !== 'distress') blocks.push(vision.imageRules());
 
@@ -669,7 +694,6 @@ async function handleMessage(msg, update, bot, deadline) {
 
   const sent = await deliver(msg, cr.text, { isGroup: isGroup || channel, mode: decision.mode });
 
-  // Запоминаем сказанное для антиповтора. Служебные сигналы (только реакция/стикер) не пишем.
   if (sent && !/^\[(REACTION|STICKER):/i.test(sent)) {
     try { await memory.rememberReply(chatId, sent); } catch (_) {}
   }
@@ -684,7 +708,11 @@ async function handleMessage(msg, update, bot, deadline) {
   await dropTrap();
   await adminAct(drinkState);
 
-  return { status: 'success', mode: decision.mode, reason: decision.reason, credit: cr.applied || 0, calendar: calState.key || 'none', drunk: drinkState.drunk };
+  return {
+    status: 'success', mode: decision.mode, reason: decision.reason,
+    credit: cr.applied || 0, calendar: calState.key || 'none',
+    drunk: drinkState.drunk, charm: fam.known ? 'tease' : 'seduce', seen: fam.local + '/' + fam.global
+  };
 }
 
 module.exports = async (req, res) => {
@@ -698,6 +726,7 @@ module.exports = async (req, res) => {
       credit: credit.enabled() ? 'on' : 'off',
       traps: traps.info(),
       baijiu: drunk.info(),
+      charm: charm.info(),
       admin: admin ? (admin.info ? admin.info() : 'on') : 'нет модуля',
       crosschat: crosschat ? 'on' : 'нет модуля',
       antirepeat: typeof memory.isRepeat === 'function' ? 'on' : 'нет функции в memory.js',
@@ -721,7 +750,6 @@ module.exports = async (req, res) => {
   let bot = c.botUsername;
   try { bot = await tg.botUsername(); } catch (_) {}
 
-  // Пьяный режим достаём заранее: он должен действовать и на шифры, и на кнопки курсов.
   const chatIdForDeps = (update.callback_query && update.callback_query.message && update.callback_query.message.chat && update.callback_query.message.chat.id)
     || (update.message && update.message.chat && update.message.chat.id)
     || (update.channel_post && update.channel_post.chat && update.channel_post.chat.id)
@@ -736,7 +764,8 @@ module.exports = async (req, res) => {
       const deps = {
         memory, generateReply, buildContents,
         sendMessage: tg.sendMessage, telegram: tg.telegram, answerCallback: tg.answerCallback,
-        botUsername: bot, deadline, modeBlock, drunk: drinkStateEarly.drunk
+        botUsername: bot, deadline, modeBlock, drunk: drinkStateEarly.drunk,
+        charmBlock: charm.shortBlock(false)
       };
       if (c.codesEnabled && await codes.handleCallback(cq, deps)) return res.status(200).json({ status: 'code_callback' });
       if (await traps.handleCallback(cq)) return res.status(200).json({ status: 'trap_callback' });
@@ -749,7 +778,6 @@ module.exports = async (req, res) => {
       const m = update.my_chat_member;
       const st = m.new_chat_member && m.new_chat_member.status;
       if (['left', 'kicked'].includes(st)) await memory.removeChat(m.chat.id);
-      // Права могли измениться - сбрасываем кэш, чтобы она узнала об админке сразу.
       if (admin && admin.invalidate) { try { await admin.invalidate(m.chat.id); } catch (_) {} }
       return res.status(200).json({ status: 'membership' });
     }
@@ -762,7 +790,8 @@ module.exports = async (req, res) => {
       const deps = {
         memory, generateReply, buildContents,
         sendMessage: tg.sendMessage, telegram: tg.telegram, answerCallback: tg.answerCallback,
-        botUsername: bot, deadline, modeBlock, drunk: drinkStateEarly.drunk
+        botUsername: bot, deadline, modeBlock, drunk: drinkStateEarly.drunk,
+        charmBlock: charm.shortBlock(false)
       };
       if (await codes.handleMessage(msg, deps)) return res.status(200).json({ status: 'code' });
       const raw = String(msg.text || msg.caption || '');
